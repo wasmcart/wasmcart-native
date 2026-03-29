@@ -1,0 +1,11 @@
+build/
+deps/libnode/
+*.tar.gz
+*.zip
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+.DS_Store
