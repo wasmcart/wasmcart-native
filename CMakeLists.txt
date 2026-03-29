@@ -67,18 +67,41 @@ add_executable(wasmcart-run src/main.c src/egl_context.c)
 target_link_libraries(wasmcart-run PRIVATE wasmcart)
 
 # SDL2 — prefer static linking for single-binary distribution
-find_library(SDL2_STATIC libSDL2.a SDL2 PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib)
-if(SDL2_STATIC AND EXISTS "${SDL2_STATIC}")
+if(WIN32)
+    # Windows: use SDL2 from cmake package (set via -DSDL2_DIR)
+    find_package(SDL2 CONFIG)
+    if(SDL2_FOUND)
+        target_include_directories(wasmcart-run PRIVATE ${SDL2_INCLUDE_DIRS})
+        target_link_libraries(wasmcart-run PRIVATE SDL2::SDL2-static SDL2::SDL2main)
+        set(SDL2_STATIC "win32-package")
+    endif()
+else()
+    find_library(SDL2_STATIC libSDL2.a PATHS
+        /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/local/lib
+        /opt/homebrew/lib /usr/local/opt/sdl2/lib)
+endif()
+if(SDL2_STATIC)
     message(STATUS "Using static SDL2: ${SDL2_STATIC}")
     target_link_libraries(wasmcart-run PRIVATE ${SDL2_STATIC})
-    # SDL2 static needs these system deps
-    target_link_libraries(wasmcart-run PRIVATE
-        asound pulse samplerate
-        X11 Xext Xcursor Xi Xfixes Xrandr Xss
-        wayland-client wayland-egl wayland-cursor
-        xkbcommon decor-0
-        drm gbm
-    )
+    # Platform-specific SDL2 system deps
+    if(APPLE)
+        target_link_libraries(wasmcart-run PRIVATE
+            "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreHaptics"
+            "-framework GameController" "-framework CoreVideo" "-framework Cocoa"
+            "-framework IOKit" "-framework ForceFeedback" "-framework Carbon"
+            "-framework CoreFoundation" "-framework Metal" "-framework QuartzCore"
+            iconv)
+    elseif(WIN32)
+        target_link_libraries(wasmcart-run PRIVATE
+            winmm imm32 setupapi version ole32 oleaut32 gdi32 user32 shell32 advapi32)
+    else()
+        target_link_libraries(wasmcart-run PRIVATE
+            asound pulse samplerate
+            X11 Xext Xcursor Xi Xfixes Xrandr Xss
+            wayland-client wayland-egl wayland-cursor
+            xkbcommon decor-0
+            drm gbm)
+    endif()
 else()
     # Fallback to shared SDL2
     find_package(PkgConfig)
