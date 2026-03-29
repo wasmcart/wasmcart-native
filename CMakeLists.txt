@@ -39,7 +39,11 @@ target_include_directories(wasmcart PRIVATE
     deps
     ${LIBNODE_DIR}/include
 )
-target_link_libraries(wasmcart PUBLIC ${LIBNODE_DIR}/libnode.a pthread dl m)
+if(WIN32)
+    target_link_libraries(wasmcart PUBLIC ${LIBNODE_DIR}/libnode.lib winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
+else()
+    target_link_libraries(wasmcart PUBLIC ${LIBNODE_DIR}/libnode.a pthread dl m)
+endif()
 
 # GLES3 + EGL — use ANGLE on macOS/Windows, system libs on Linux
 set(ANGLE_DIR "" CACHE PATH "Path to ANGLE (lib/ + include/)")
