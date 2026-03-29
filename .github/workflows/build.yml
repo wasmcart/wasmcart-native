@@ -127,6 +127,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: ilammy/msvc-dev-cmd@v1
       - name: Install SDL2
         shell: bash
         run: |
@@ -160,8 +161,8 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake .. -DSDL2_DIR=..\deps\SDL2\cmake -DANGLE_DIR=..\deps\angle -DLIBNODE_DIR=..\deps\libnode -DCMAKE_CXX_FLAGS="/std:c++20"
-          cmake --build . --config Release
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL2_DIR=..\deps\SDL2\cmake -DANGLE_DIR=..\deps\angle -DLIBNODE_DIR=..\deps\libnode
+          ninja
       - name: Package
         shell: bash
         run: |
