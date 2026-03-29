@@ -62,17 +62,120 @@ jobs:
           name: wasmcart-native-linux-aarch64
           path: wasmcart-native-linux-aarch64.tar.gz
 
-  # TODO: macOS needs ANGLE or OpenGL.framework headers (no GLES3/gl3.h on macOS)
-  # build-macos-x86_64:
-  #   runs-on: macos-15-intel
-  # build-macos-aarch64:
-  #   runs-on: macos-15
+  build-macos-x86_64:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install deps
+        run: brew install cmake sdl2
+      - name: Download ANGLE
+        run: |
+          mkdir -p deps/angle/lib deps/angle/include
+          curl -sL https://github.com/kivy/angle-builder/releases/download/chromium-7151_rev1/angle-macos-x64.tar.gz | tar xz -C deps/angle
+          # Move dylibs to lib/ if at root
+          find deps/angle -maxdepth 1 -name '*.dylib' -exec mv {} deps/angle/lib/ \;
+      - name: Download libnode
+        run: |
+          mkdir -p deps/libnode
+          curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-macos-x86_64.tar.gz | tar xz -C deps/libnode
+      - name: Build
+        run: |
+          mkdir build && cd build
+          cmake .. -DANGLE_DIR=../deps/angle
+          make -j$(sysctl -n hw.ncpu)
+      - name: Package
+        run: |
+          strip build/wasmcart-run
+          cp deps/angle/lib/*.dylib build/
+          tar czf wasmcart-native-macos-x86_64.tar.gz -C build wasmcart-run libEGL.dylib libGLESv2.dylib
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasmcart-native-macos-x86_64
+          path: wasmcart-native-macos-x86_64.tar.gz
 
-  # TODO: Windows and macOS need ANGLE for GLES3 (no native GLES on these platforms)
-  # Will use build-angle releases for libEGL + libGLESv2
+  build-macos-aarch64:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install deps
+        run: brew install cmake sdl2
+      - name: Download ANGLE
+        run: |
+          mkdir -p deps/angle/lib deps/angle/include
+          curl -sL https://github.com/kivy/angle-builder/releases/download/chromium-7151_rev1/angle-macos-arm64.tar.gz | tar xz -C deps/angle
+          find deps/angle -maxdepth 1 -name '*.dylib' -exec mv {} deps/angle/lib/ \;
+      - name: Download libnode
+        run: |
+          mkdir -p deps/libnode
+          curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-macos-aarch64.tar.gz | tar xz -C deps/libnode
+      - name: Build
+        run: |
+          mkdir build && cd build
+          cmake .. -DANGLE_DIR=../deps/angle
+          make -j$(sysctl -n hw.ncpu)
+      - name: Package
+        run: |
+          strip build/wasmcart-run
+          cp deps/angle/lib/*.dylib build/
+          tar czf wasmcart-native-macos-aarch64.tar.gz -C build wasmcart-run libEGL.dylib libGLESv2.dylib
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasmcart-native-macos-aarch64
+          path: wasmcart-native-macos-aarch64.tar.gz
+
+  build-windows-x86_64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install SDL2
+        shell: bash
+        run: |
+          curl -sL https://github.com/libsdl-org/SDL/releases/download/release-2.32.4/SDL2-devel-2.32.4-VC.zip -o sdl2.zip
+          unzip -q sdl2.zip -d deps/
+          mv deps/SDL2-2.32.4 deps/SDL2
+      - name: Download ANGLE
+        shell: bash
+        run: |
+          curl -sL https://github.com/mmozeiko/build-angle/releases/download/2026-03-01/angle-x64-2026-03-01.zip -o angle.zip
+          unzip -q angle.zip -d deps/angle_tmp
+          mkdir -p deps/angle/lib deps/angle/include
+          # Find extracted subdir
+          ADIR=$(ls deps/angle_tmp | head -1)
+          cp deps/angle_tmp/$ADIR/bin/*.dll deps/angle/lib/ 2>/dev/null || true
+          # Rename .dll.lib to .lib
+          for f in deps/angle_tmp/$ADIR/lib/*.dll.lib; do
+            newname=$(basename "$f" .dll.lib).lib
+            cp "$f" "deps/angle/lib/$newname"
+          done
+          cp -r deps/angle_tmp/$ADIR/include/* deps/angle/include/
+          rm -rf deps/angle_tmp
+      - name: Download libnode
+        shell: bash
+        run: |
+          mkdir -p deps/libnode
+          curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-windows-x86_64.zip -o libnode.zip
+          unzip -q libnode.zip -d deps/libnode
+      - name: Build
+        shell: cmd
+        run: |
+          mkdir build
+          cd build
+          cmake .. -DSDL2_DIR=..\deps\SDL2\cmake -DANGLE_DIR=..\deps\angle -DLIBNODE_DIR=..\deps\libnode
+          cmake --build . --config Release
+      - name: Package
+        shell: bash
+        run: |
+          cp deps/SDL2/lib/x64/SDL2.dll build/Release/ 2>/dev/null || true
+          cp deps/angle/lib/*.dll build/Release/ 2>/dev/null || true
+          cd build/Release
+          7z a ../../wasmcart-native-windows-x86_64.zip wasmcart-run.exe SDL2.dll libEGL.dll libGLESv2.dll
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasmcart-native-windows-x86_64
+          path: wasmcart-native-windows-x86_64.zip
 
   release:
-    needs: [build-linux-x86_64, build-linux-aarch64]
+    needs: [build-linux-x86_64, build-linux-aarch64, build-macos-x86_64, build-macos-aarch64, build-windows-x86_64]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
@@ -95,6 +198,11 @@ jobs:
             ./wasmcart-run game.wasc --res 1920x1080
             ./wasmcart-run game.wasc --fps --uncapped
             ```
+
+            macOS and Windows include ANGLE (libEGL + libGLESv2) for GLES3 support.
           files: |
             artifacts/wasmcart-native-linux-x86_64/*.tar.gz
             artifacts/wasmcart-native-linux-aarch64/*.tar.gz
+            artifacts/wasmcart-native-macos-x86_64/*.tar.gz
+            artifacts/wasmcart-native-macos-aarch64/*.tar.gz
+            artifacts/wasmcart-native-windows-x86_64/*.zip

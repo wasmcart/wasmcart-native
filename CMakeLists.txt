@@ -36,10 +36,29 @@ target_include_directories(wasmcart PRIVATE
 )
 target_link_libraries(wasmcart PUBLIC ${LIBNODE_DIR}/libnode.a pthread dl m)
 
-# GLES3
-find_library(GLESV2_LIB GLESv2)
-if(GLESV2_LIB)
-    target_link_libraries(wasmcart PUBLIC ${GLESV2_LIB})
+# GLES3 + EGL — use ANGLE on macOS/Windows, system libs on Linux
+set(ANGLE_DIR "" CACHE PATH "Path to ANGLE (lib/ + include/)")
+if(ANGLE_DIR AND EXISTS "${ANGLE_DIR}/include")
+    message(STATUS "Using ANGLE from: ${ANGLE_DIR}")
+    target_include_directories(wasmcart PUBLIC ${ANGLE_DIR}/include)
+    if(APPLE)
+        target_link_libraries(wasmcart PUBLIC
+            ${ANGLE_DIR}/lib/libEGL.dylib
+            ${ANGLE_DIR}/lib/libGLESv2.dylib)
+    elseif(WIN32)
+        target_link_libraries(wasmcart PUBLIC
+            ${ANGLE_DIR}/lib/libEGL.lib
+            ${ANGLE_DIR}/lib/libGLESv2.lib)
+    endif()
+else()
+    find_library(GLESV2_LIB GLESv2)
+    find_library(EGL_LIB_FOR_WASMCART EGL)
+    if(GLESV2_LIB)
+        target_link_libraries(wasmcart PUBLIC ${GLESV2_LIB})
+    endif()
+    if(EGL_LIB_FOR_WASMCART)
+        target_link_libraries(wasmcart PUBLIC ${EGL_LIB_FOR_WASMCART})
+    endif()
 endif()
 
 # ─── wasmcart-run (standalone player) ───────────────────────────────────
