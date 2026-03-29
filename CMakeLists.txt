@@ -5,6 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
+# MSVC: force C++20
+if(MSVC)
+    add_compile_options(/std:c++20)
+endif()
+
 # ─── Node.js / libnode ───────────────────────────────────────────────────
 
 set(LIBNODE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/libnode" CACHE PATH "Path to libnode.a + headers")
@@ -90,6 +95,7 @@ if(SDL2_STATIC)
             "-framework GameController" "-framework CoreVideo" "-framework Cocoa"
             "-framework IOKit" "-framework ForceFeedback" "-framework Carbon"
             "-framework CoreFoundation" "-framework Metal" "-framework QuartzCore"
+            "-framework Security" "-framework SystemConfiguration"
             iconv)
     elseif(WIN32)
         target_link_libraries(wasmcart-run PRIVATE
