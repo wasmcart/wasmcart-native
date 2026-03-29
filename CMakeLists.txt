@@ -5,9 +5,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
-# MSVC: force C++20 via compile features
+# MSVC: force C++20 and proper __cplusplus macro
 if(MSVC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++20")
+    add_compile_options(/std:c++20 /Zc:__cplusplus)
 endif()
 
 # ─── Node.js / libnode ───────────────────────────────────────────────────
