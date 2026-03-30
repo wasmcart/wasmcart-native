@@ -289,11 +289,18 @@ int main(int argc, char* argv[]) {
         SDL_SysWMinfo wm_info;
         SDL_VERSION(&wm_info.version);
         if (SDL_GetWindowWMInfo(window, &wm_info)) {
-#ifdef SDL_VIDEO_DRIVER_X11
-            egl_create_window_surface((void*)(uintptr_t)wm_info.info.x11.window);
-#elif defined(SDL_VIDEO_DRIVER_WAYLAND)
-            egl_create_window_surface(wm_info.info.wl.egl_window);
+            // Runtime check — SDL2 may use X11 or Wayland regardless of compile flags
+            if (wm_info.subsystem == SDL_SYSWM_WAYLAND) {
+#ifdef SDL_VIDEO_DRIVER_WAYLAND
+                fprintf(stderr, "wasmcart: using Wayland EGL window surface\n");
+                egl_create_window_surface((void*)wm_info.info.wl.egl_window);
 #endif
+            } else if (wm_info.subsystem == SDL_SYSWM_X11) {
+#ifdef SDL_VIDEO_DRIVER_X11
+                fprintf(stderr, "wasmcart: using X11 EGL window surface\n");
+                egl_create_window_surface((void*)(uintptr_t)wm_info.info.x11.window);
+#endif
+            }
             egl_make_current();
             if (uncapped) {
                 extern void* egl_get_display(void);

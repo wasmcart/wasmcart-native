@@ -75,6 +75,10 @@ static int v8_init() {
 
     // Enable WASM exnref (standard exception handling) — same as --experimental-wasm-exnref
     v8::V8::SetFlagsFromString("--experimental-wasm-exnref");
+    // Optimize WASM↔JS transitions
+    v8::V8::SetFlagsFromString("--turbo-inline-js-wasm-calls");
+    v8::V8::SetFlagsFromString("--turbo-optimize-inlined-js-wasm-wrappers");
+    v8::V8::SetFlagsFromString("--turboshaft-wasm-in-js-inlining");
 
     std::vector<std::string> args = {"wasmcart-run"};
     auto result = node::InitializeOncePerProcess(args, {
@@ -177,6 +181,7 @@ static void parse_cart_info(wc_host_t* host, uint32_t info_ptr) {
 static void write_host_info(wc_host_t* host, const wc_host_options_t* opts) {
     uint32_t ptr = host->info.host_info_ptr;
     if (ptr == 0) return;
+    refresh_memory(host);
     uint8_t* mem = host->memory;
     wc_write_u32(mem, ptr + WC_HOST_INFO_PREFERRED_WIDTH, opts ? opts->preferred_width : 0);
     wc_write_u32(mem, ptr + WC_HOST_INFO_PREFERRED_HEIGHT, opts ? opts->preferred_height : 0);
@@ -199,6 +204,7 @@ static v8::Local<v8::Function> make_fn(host_fn_cb cb) {
 static wc_host_t* _current_host = nullptr; // set before instantiation
 
 static void v8_wc_log(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    refresh_memory(_current_host);
     uint32_t ptr = args[0]->Uint32Value(ctx()).FromJust();
     uint32_t len = args[1]->Uint32Value(ctx()).FromJust();
     fprintf(stderr, "wasmcart [cart]: %.*s\n", (int)len, (const char*)(_current_host->memory + ptr));
@@ -209,6 +215,7 @@ static void v8_emscripten_notify_memory_growth(const v8::FunctionCallbackInfo<v8
 }
 
 static void v8_emscripten_memcpy_js(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    refresh_memory(_current_host);
     uint32_t dest = args[0]->Uint32Value(ctx()).FromJust();
     uint32_t src = args[1]->Uint32Value(ctx()).FromJust();
     uint32_t n = args[2]->Uint32Value(ctx()).FromJust();
@@ -216,6 +223,7 @@ static void v8_emscripten_memcpy_js(const v8::FunctionCallbackInfo<v8::Value>& a
 }
 
 static void v8_wc_asset_size(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    refresh_memory(_current_host);
     uint32_t path_ptr = args[0]->Uint32Value(ctx()).FromJust();
     uint32_t path_len = args[1]->Uint32Value(ctx()).FromJust();
     char path[512];
@@ -227,6 +235,7 @@ static void v8_wc_asset_size(const v8::FunctionCallbackInfo<v8::Value>& args) {
 }
 
 static void v8_wc_load_asset(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    refresh_memory(_current_host);
     uint32_t path_ptr = args[0]->Uint32Value(ctx()).FromJust();
     uint32_t path_len = args[1]->Uint32Value(ctx()).FromJust();
     uint32_t dest_ptr = args[2]->Uint32Value(ctx()).FromJust();
@@ -235,7 +244,6 @@ static void v8_wc_load_asset(const v8::FunctionCallbackInfo<v8::Value>& args) {
     uint32_t len = path_len < 511 ? path_len : 511;
     memcpy(path, _current_host->memory + path_ptr, len);
     path[len] = '\0';
-    refresh_memory(_current_host);
     if (dest_ptr + max_size > _current_host->memory_size) {
         args.GetReturnValue().Set(-1);
         return;
@@ -290,6 +298,7 @@ extern "C" void wc_gl_build_v8_imports(v8::Isolate* isolate, v8::Local<v8::Conte
 
 static void v8_fd_write(const v8::FunctionCallbackInfo<v8::Value>& args) {
     // fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno
+    refresh_memory(_current_host);
     uint32_t fd = args[0]->Uint32Value(ctx()).FromJust();
     uint32_t iovs_ptr = args[1]->Uint32Value(ctx()).FromJust();
     uint32_t iovs_len = args[2]->Uint32Value(ctx()).FromJust();
@@ -322,6 +331,7 @@ static void v8_proc_exit(const v8::FunctionCallbackInfo<v8::Value>& args) {
 
 static void v8_clock_time_get(const v8::FunctionCallbackInfo<v8::Value>& args) {
     // clock_time_get(id, precision, timestamp_ptr) -> errno
+    refresh_memory(_current_host);
     uint32_t ts_ptr = args[2]->Uint32Value(ctx()).FromJust();
     uint64_t nanos;
 #ifdef _WIN32
@@ -339,6 +349,7 @@ static void v8_clock_time_get(const v8::FunctionCallbackInfo<v8::Value>& args) {
 }
 
 static void v8_random_get(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    refresh_memory(_current_host);
     uint32_t buf_ptr = args[0]->Uint32Value(ctx()).FromJust();
     uint32_t buf_len = args[1]->Uint32Value(ctx()).FromJust();
     uint8_t* dest = _current_host->memory + buf_ptr;
@@ -597,6 +608,11 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
             if (result.IsEmpty() && try_catch.HasCaught()) {
                 v8::String::Utf8Value err(g_isolate, try_catch.Exception());
                 fprintf(stderr, "wasmcart: wc_init error: %s\n", *err);
+                auto stack = try_catch.StackTrace(ctx());
+                if (!stack.IsEmpty()) {
+                    v8::String::Utf8Value st(g_isolate, stack.ToLocalChecked());
+                    fprintf(stderr, "wasmcart: stack: %s\n", *st);
+                }
             }
             refresh_memory(host);
         }

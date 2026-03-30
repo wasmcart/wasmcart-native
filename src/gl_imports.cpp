@@ -30,6 +30,20 @@ static uint32_t _cart_blit_w = 0, _cart_blit_h = 0; // actual render size from c
 static int _fbo_log_frames = 0;
 static int _draw_call_count = 0;
 
+// Filtered extension list — match WebGL2/Node.js host
+// Prevents Skia/Ganesh from requiring ES 3.1+ functions not in the WASM GL import table
+static const char* _filtered_extensions[] = {
+    "GL_EXT_texture_filter_anisotropic",
+    "GL_OES_texture_float_linear",
+    "GL_EXT_color_buffer_float",
+    "GL_EXT_float_blend",
+    "GL_OES_packed_depth_stencil",
+    "GL_OES_texture_npot",
+    "GL_EXT_texture_norm16",
+    NULL
+};
+static const int _num_filtered_extensions = 7;
+
 // ─── Client-side vertex array support ────────────────────────────────────
 // gl4es uses client-side arrays (no VBO bound). We must track the WASM pointers
 // and upload to temp VBOs before draw calls, just like the Node.js host does.
@@ -89,6 +103,9 @@ static void _uploadClientIndices(uint32_t wasmPtr, int count, GLenum type) {
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, totalBytes, _host->memory + wasmPtr, GL_STREAM_DRAW);
 }
 
+// Forward declare — defined in cart_host.cpp
+extern "C" void wc_refresh_memory(wc_host_t* host);
+
 // Helper: WASM pointer to native pointer
 static inline void* wptr(uint32_t p) {
     return p ? (_host->memory + p) : NULL;
@@ -100,14 +117,17 @@ static inline void* wptr(uint32_t p) {
 
 #define GL_REG(name, nparams, nresults, body) \
     static void _cb_##name(const v8::FunctionCallbackInfo<v8::Value>& _args) { \
+        v8::Local<v8::Context> _ctx = ctx(); \
+        (void)_ctx; \
+        wc_refresh_memory(_host); \
         body; \
     }
 
-#define A_I32(n) (_args[n]->Int32Value(ctx()).FromJust())
-#define A_U32(n) (_args[n]->Uint32Value(ctx()).FromJust())
-#define A_F32(n) ((float)_args[n]->NumberValue(ctx()).FromJust())
-#define A_F64(n) (_args[n]->NumberValue(ctx()).FromJust())
-#define A_I64(n) ((int64_t)_args[n]->IntegerValue(ctx()).FromJust())
+#define A_I32(n) (_args[n]->Int32Value(_ctx).FromJust())
+#define A_U32(n) (_args[n]->Uint32Value(_ctx).FromJust())
+#define A_F32(n) ((float)_args[n]->NumberValue(_ctx).FromJust())
+#define A_F64(n) (_args[n]->NumberValue(_ctx).FromJust())
+#define A_I64(n) ((int64_t)_args[n]->IntegerValue(_ctx).FromJust())
 #define R_I32(v) _args.GetReturnValue().Set((int32_t)(v))
 #define R_F32(v) _args.GetReturnValue().Set((double)(v))
 
@@ -122,12 +142,23 @@ GL_REG(glHint, 2, 0, glHint(A_U32(0), A_U32(1)))
 GL_REG(glPixelStorei, 2, 0, glPixelStorei(A_U32(0), A_I32(1)))
 GL_REG(glIsEnabled, 1, 1, R_I32(glIsEnabled(A_U32(0))))
 
-GL_REG(glGetIntegerv, 2, 0, glGetIntegerv(A_U32(0), (GLint*)wptr(A_U32(1))))
+GL_REG(glGetIntegerv, 2, 0, {
+    uint32_t pname = A_U32(0);
+    if (pname == 0x821D) { // GL_NUM_EXTENSIONS — return filtered count
+        *(GLint*)wptr(A_U32(1)) = _num_filtered_extensions;
+    } else {
+        glGetIntegerv(pname, (GLint*)wptr(A_U32(1)));
+    }
+})
 GL_REG(glGetFloatv, 2, 0, glGetFloatv(A_U32(0), (GLfloat*)wptr(A_U32(1))))
 GL_REG(glGetBooleanv, 2, 0, glGetBooleanv(A_U32(0), (GLboolean*)wptr(A_U32(1))))
+GL_REG(glGetInternalformativ, 5, 0,
+    glGetInternalformativ(A_U32(0), A_U32(1), A_U32(2), A_I32(3), (GLint*)wptr(A_U32(4))))
 
-// glGetString: allocate buffer via cart's malloc
+// glGetString: allocate buffer via cart's malloc (cache per GL_xxx name)
 static uint32_t _glstring_cache[8] = {0};
+// NOTE: if you change overridden strings (GL_VERSION, GL_EXTENSIONS, etc.),
+// clear _glstring_cache or the old value persists.
 
 // Forward declare — defined in cart_host.cpp
 extern "C" v8::Global<v8::Function>* wc_get_malloc_fn(wc_host_t* host);
@@ -156,6 +187,17 @@ static uint32_t _gl_alloc_string(wc_host_t* host, const char* s) {
 GL_REG(glGetString, 1, 1, {
     uint32_t name = A_U32(0);
     const char* s = (const char*)glGetString(name);
+    // Report ES 3.0 and filtered extensions to match Node.js/WebGL2 host behavior.
+    // Native Mesa reports ES 3.2 with many extensions — Skia then requires function pointers
+    // for those extensions which the cart's MAP table doesn't have.
+    if (name == 0x1F02) s = "OpenGL ES 3.0 wasmcart"; // GL_VERSION
+    // Don't override GL_SHADING_LANGUAGE_VERSION — let Mesa report real version.
+    // ioquake3 uses #version 100 shaders that need the real GLSL 3.x compiler for sampler2DShadow.
+    if (name == 0x1F03) { // GL_EXTENSIONS — return WebGL2-compatible subset
+        s = "GL_EXT_texture_filter_anisotropic GL_OES_texture_float_linear "
+            "GL_EXT_color_buffer_float GL_EXT_float_blend GL_OES_packed_depth_stencil "
+            "GL_OES_texture_npot GL_EXT_texture_norm16";
+    }
     if (!s) { R_I32(0); } else {
         int idx = (name == 0x1F00) ? 0 : (name == 0x1F01) ? 1 : (name == 0x1F02) ? 2 :
                   (name == 0x1F03) ? 3 : (name == 0x8B8C) ? 4 : 5;
@@ -256,6 +298,8 @@ GL_REG(glCompileShader, 1, 0, glCompileShader(A_U32(0)))
 GL_REG(glIsShader, 1, 1, R_I32(glIsShader(A_U32(0))))
 
 GL_REG(glShaderSource, 4, 0, {
+    // Refresh memory — cart may have grown WASM memory since last refresh
+    wc_refresh_memory(_host);
     uint32_t shader = A_U32(0);
     int32_t count = A_I32(1);
     uint32_t strings_ptr = A_U32(2);
@@ -432,10 +476,18 @@ GL_REG(glReadBuffer, 1, 0, glReadBuffer(A_U32(0)))
 GL_REG(glGetStringi, 2, 1, {
     uint32_t name = A_U32(0);
     uint32_t index = A_U32(1);
-    const char* s = (const char*)glGetStringi(name, index);
-    if (!s) { R_I32(0); } else {
-        uint32_t ptr = _gl_alloc_string(_host, s);
-        R_I32(ptr);
+    if (name == 0x1F03) { // GL_EXTENSIONS — return filtered list
+        const char* s = (index < (uint32_t)_num_filtered_extensions) ? _filtered_extensions[index] : NULL;
+        if (!s) { R_I32(0); } else {
+            uint32_t ptr = _gl_alloc_string(_host, s);
+            R_I32(ptr);
+        }
+    } else {
+        const char* s = (const char*)glGetStringi(name, index);
+        if (!s) { R_I32(0); } else {
+            uint32_t ptr = _gl_alloc_string(_host, s);
+            R_I32(ptr);
+        }
     }
 })
 GL_REG(glGetInteger64v, 2, 0, glGetInteger64v(A_U32(0), (GLint64*)wptr(A_U32(1))))
@@ -523,11 +575,14 @@ GL_REG(glBlitFramebuffer, 10, 0, {
     if (_last_draw_fbo == _redirect_fbo && (A_U32(8) & GL_COLOR_BUFFER_BIT)) {
         _cart_blitted_to_redirect = 1;
         // Track the cart's actual render size from the source rect
-        uint32_t src_w = A_I32(2) - A_I32(0);
-        uint32_t src_h = A_I32(3) - A_I32(1);
-        if (src_w > 0 && src_h > 0) {
-            _cart_blit_w = src_w;
-            _cart_blit_h = src_h;
+        // Use signed math — Ganesh may blit with Y-inverted coords
+        int32_t sw = A_I32(2) - A_I32(0);
+        int32_t sh = A_I32(3) - A_I32(1);
+        if (sw < 0) sw = -sw;
+        if (sh < 0) sh = -sh;
+        if (sw > 0 && sh > 0) {
+            _cart_blit_w = (uint32_t)sw;
+            _cart_blit_h = (uint32_t)sh;
         }
     }
     glBlitFramebuffer(A_I32(0), A_I32(1), A_I32(2), A_I32(3), A_I32(4), A_I32(5), A_I32(6), A_I32(7), A_U32(8), A_U32(9));
@@ -646,6 +701,7 @@ typedef struct {
     const char* sig; // kept for reference, not used in V8 registration
 } gl_import_entry_t;
 
+
 // Signature format: "iiff>i" means 2 i32 params, 2 f32 params, returns i32
 // "iiii>" means 4 i32 params, void return
 #define GL_E(name, sig_str) { #name, _cb_##name, sig_str }
@@ -657,6 +713,7 @@ static const gl_import_entry_t gl_table[] = {
     GL_E(glPixelStorei, "ii>"), GL_E(glIsEnabled, "i>i"),
     GL_E(glGetIntegerv, "ii>"), GL_E(glGetFloatv, "ii>"),
     GL_E(glGetBooleanv, "ii>"), GL_E(glGetString, "i>i"),
+    GL_E(glGetInternalformativ, "iiiii>"),
     // Viewport/clear
     GL_E(glViewport, "iiii>"), GL_E(glScissor, "iiii>"), GL_E(glClear, "i>"),
     GL_E(glClearColor, "ffff>"), GL_E(glClearDepthf, "f>"), GL_E(glClearStencil, "i>"),
@@ -856,7 +913,6 @@ extern "C" void wc_gl_blit_to_screen(uint32_t cart_w, uint32_t cart_h, uint32_t 
     glViewport(0, 0, win_w, win_h);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
-    // Debug: check redirect FBO content
     glBlitFramebuffer(0, 0, src_w, src_h,
         dst_x, dst_y, dst_x + dst_w, dst_y + dst_h,
         GL_COLOR_BUFFER_BIT, GL_LINEAR);
@@ -880,16 +936,14 @@ extern "C" void wc_gl_build_v8_imports(v8::Isolate* isolate, v8::Local<v8::Conte
     v8::Local<v8::Object> gl_obj, v8::Local<v8::Object> env_obj, wc_host_t* host) {
     _host = host;
 
-    for (const gl_import_entry_t* e = gl_table; e->name; e++) {
+    int idx = 0;
+    for (const gl_import_entry_t* e = gl_table; e->name; e++, idx++) {
         auto fn = v8::Function::New(context, e->cb).ToLocalChecked();
         auto name = v8::String::NewFromUtf8(isolate, e->name).ToLocalChecked();
-
-        // Register under "gl" module
         gl_obj->Set(context, name, fn).Check();
-        // Also register under "env" for gl4es-style carts
         env_obj->Set(context, name, fn).Check();
     }
 
-    fprintf(stderr, "wasmcart: GL imports registered (%s)\n",
-        (const char*)glGetString(GL_RENDERER));
+    fprintf(stderr, "wasmcart: GL imports registered (%d functions, %s)\n",
+        idx, (const char*)glGetString(GL_RENDERER));
 }

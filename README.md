@@ -31,10 +31,12 @@ Every `.wasc` cart that runs in the browser or Node.js also runs here. Same WASM
 
 V8's Liftoff baseline compiler starts WASM instantly — no compilation delay, even for 52MB Godot carts (356ms load time).
 
-| Cart | FPS (uncapped) |
+| Cart | FPS (uncapped, 1080p) |
 |------|---------------|
 | Snake (320x240 2D) | 4,900 |
-| OpenArena (1080p GL) | 830 |
+| Three.js (WebGL2) | 2,470 |
+| OpenArena (ioquake3 GL) | 830 |
+| Adventure AI (Skia Ganesh GPU) | 716 |
 | Warlords (Godot GL) | 430 |
 
 ## Build
@@ -102,6 +104,42 @@ Determined by the cart's `gpu_api` field:
 |---------|------|-------------|
 | 0 | 2D framebuffer | SDL2 accelerated renderer + letterboxing |
 | 1 | WebGL2 / GLES3 | EGL window surface + FBO redirect + letterboxing |
+
+## Development Notes
+
+### GL Import Bridge (gl_imports.cpp)
+
+~190 GLES3 functions registered as V8 FunctionCallbacks. Key non-obvious behaviors:
+
+**FBO Redirect**: All `glBindFramebuffer(GL_FRAMEBUFFER, 0)` calls are intercepted and redirected to a capture FBO. This lets the host blit the cart's output to the screen with letterboxing. `glClear` on the redirect FBO is suppressed after a cart blit to prevent wiping captured content.
+
+**GL Version Filtering**: `glGetString(GL_VERSION)` returns `"OpenGL ES 3.0 wasmcart"` regardless of actual driver. Extensions are filtered to a WebGL2-compatible subset (7 extensions). This prevents Skia/Ganesh from probing for ES 3.1+ functions that aren't in the WASM import table. 28 ES 3.1+ functions are registered as no-op stubs for safety.
+
+**`glGetInternalformativ`**: Required for Skia Ganesh GPU rendering. Ganesh queries max MSAA samples — without this function, `maxSamples=0` → render target creation fails → software fallback at ~60 FPS instead of 700+ FPS GPU.
+
+**Signed Blit Coordinates**: `glBlitFramebuffer` source rect dimensions must be computed with signed math. Ganesh uses Y-inverted blits (srcY0 > srcY1). Storing the height as `uint32_t` causes wrap-around to ~4 billion → corrupted blit → black screen.
+
+**Client-Side Vertex Arrays**: gl4es carts pass WASM memory offsets as "pointers" to `glVertexAttribPointer` with no VBO bound. The bridge tracks `GL_ARRAY_BUFFER` binding state and uploads client-side data to temp VBOs at draw time.
+
+### Performance: Native vs Node.js Host
+
+The Node.js host (retroemu/cli.js + native-gles) currently beats the native host on some GL carts (~860 vs ~716 FPS for Skia Ganesh). Both use V8 for WASM and the same GPU for GL. The gap is in the GL call overhead:
+
+- **Node.js host**: GL calls go through N-API (native-gles addon) — one function pointer call per GL function, minimal marshaling.
+- **Native host**: GL calls go through V8 FunctionCallbacks — each call enters V8's callback machinery, extracts args from `v8::FunctionCallbackInfo`, converts types. This overhead multiplies across ~73 GL calls per frame (Ganesh) or ~193 GL calls in complex scenes.
+
+**Potential fix**: Register GL imports as "fast API calls" (`v8::CFunction`) instead of regular FunctionCallbacks. V8's fast API path bypasses the full callback machinery for simple functions with known signatures — could eliminate most of the per-call overhead.
+
+### Wayland vs X11
+
+SDL2 may choose X11 (via XWayland) on Wayland sessions. The `egl_create_window_surface` code does a runtime check on `wm_info.subsystem` (not compile-time `#ifdef`). Both backends work, but compositor behavior may differ for vsync.
+
+### Platform-Specific
+
+- **macOS / Windows**: Require ANGLE for GLES3 (no native GLES). Set `ANGLE_DIR` in cmake.
+- **macOS**: Link `-framework Security -framework SystemConfiguration` (libnode TLS).
+- **Windows**: MSVC needs `/std:c++20 /Zc:__cplusplus` (CXX only) + static CRT (`/MT`).
+- **Windows**: `clock_gettime` → `QueryPerformanceCounter` (`#ifdef _WIN32`).
 
 ## License
 
