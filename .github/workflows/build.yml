@@ -134,6 +134,9 @@ jobs:
           curl -sL https://github.com/libsdl-org/SDL/releases/download/release-2.32.4/SDL2-devel-2.32.4-VC.zip -o sdl2.zip
           unzip -q sdl2.zip -d deps/
           mv deps/SDL2-2.32.4 deps/SDL2
+          # Create SDL2/ subdir so #include <SDL2/SDL.h> works
+          mkdir -p deps/SDL2/include/SDL2
+          cp deps/SDL2/include/*.h deps/SDL2/include/SDL2/
       - name: Download ANGLE
         shell: bash
         run: |

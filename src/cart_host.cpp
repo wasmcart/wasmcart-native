@@ -14,6 +14,9 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 // ─── V8 state (module-level, single isolate) ──────────────────────────────
 
@@ -309,9 +312,17 @@ static void v8_proc_exit(const v8::FunctionCallbackInfo<v8::Value>& args) {
 static void v8_clock_time_get(const v8::FunctionCallbackInfo<v8::Value>& args) {
     // clock_time_get(id, precision, timestamp_ptr) -> errno
     uint32_t ts_ptr = args[2]->Uint32Value(ctx()).FromJust();
+    uint64_t nanos;
+#ifdef _WIN32
+    LARGE_INTEGER freq, count;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&count);
+    nanos = (uint64_t)((double)count.QuadPart / freq.QuadPart * 1000000000.0);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t nanos = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+    nanos = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+#endif
     *(uint64_t*)(_current_host->memory + ts_ptr) = nanos;
     args.GetReturnValue().Set(0);
 }
