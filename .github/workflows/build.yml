@@ -169,10 +169,10 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          cp deps/SDL2/lib/x64/SDL2.dll build/Release/ 2>/dev/null || true
-          cp deps/angle/lib/*.dll build/Release/ 2>/dev/null || true
-          cd build/Release
-          7z a ../../wasmcart-native-windows-x86_64.zip wasmcart-run.exe SDL2.dll libEGL.dll libGLESv2.dll
+          cp deps/SDL2/lib/x64/SDL2.dll build/ 2>/dev/null || true
+          cp deps/angle/lib/*.dll build/ 2>/dev/null || true
+          cd build
+          7z a ../wasmcart-native-windows-x86_64.zip wasmcart-run.exe SDL2.dll libEGL.dll libGLESv2.dll
       - uses: actions/upload-artifact@v7
         with:
           name: wasmcart-native-windows-x86_64
