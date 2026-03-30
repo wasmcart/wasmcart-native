@@ -161,7 +161,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL2_DIR=..\deps\SDL2\cmake -DANGLE_DIR=..\deps\angle -DLIBNODE_DIR=..\deps\libnode -DCMAKE_PREFIX_PATH=..\deps\SDL2
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL2_DIR=..\deps\SDL2 -DANGLE_DIR=..\deps\angle -DLIBNODE_DIR=..\deps\libnode
           ninja
       - name: Package
         shell: bash
