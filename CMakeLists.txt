@@ -76,15 +76,12 @@ add_executable(wasmcart-run src/main.c src/egl_context.c)
 target_link_libraries(wasmcart-run PRIVATE wasmcart)
 
 # SDL2 — prefer static linking for single-binary distribution
-if(WIN32)
-    # Windows: use SDL2 from cmake package (set via -DSDL2_DIR)
-    find_package(SDL2 CONFIG)
-    if(SDL2_FOUND)
-        target_include_directories(wasmcart-run PRIVATE ${SDL2_INCLUDE_DIRS})
-        target_link_libraries(wasmcart-run PRIVATE SDL2::SDL2-static SDL2::SDL2main)
-        set(SDL2_STATIC "win32-package")
-    endif()
-else()
+set(SDL2_DIR "" CACHE PATH "Path to SDL2 (Windows)")
+if(WIN32 AND SDL2_DIR)
+    target_include_directories(wasmcart-run PRIVATE ${SDL2_DIR}/include)
+    target_link_libraries(wasmcart-run PRIVATE ${SDL2_DIR}/lib/x64/SDL2.lib ${SDL2_DIR}/lib/x64/SDL2main.lib)
+    set(SDL2_STATIC "win32-manual")
+elseif(NOT WIN32)
     find_library(SDL2_STATIC libSDL2.a PATHS
         /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/local/lib
         /opt/homebrew/lib /usr/local/opt/sdl2/lib)
