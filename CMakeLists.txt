@@ -41,6 +41,9 @@ target_include_directories(wasmcart PRIVATE
     ${LIBNODE_DIR}/include
 )
 if(WIN32)
+    # /WHOLEARCHIVE forces MSVC to include all .obj from libnode.lib — V8's internal
+    # registrations use static initializers that the linker would otherwise discard.
+    target_link_options(wasmcart PUBLIC "/WHOLEARCHIVE:${LIBNODE_DIR}/libnode.lib")
     target_link_libraries(wasmcart PUBLIC ${LIBNODE_DIR}/libnode.lib winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
 else()
     target_link_libraries(wasmcart PUBLIC ${LIBNODE_DIR}/libnode.a pthread dl m)
