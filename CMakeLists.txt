@@ -41,9 +41,11 @@ target_include_directories(wasmcart PRIVATE
     ${LIBNODE_DIR}/include
 )
 if(WIN32)
-    # Link libnode.lib twice — MSVC needs second pass to resolve circular deps
-    # (our code → Node APIs → V8 APIs → all in the same archive)
-    target_link_libraries(wasmcart PUBLIC ${LIBNODE_DIR}/libnode.lib ${LIBNODE_DIR}/libnode.lib winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
+    # MSVC only links .obj files that resolve undefined symbols — V8's static
+    # initializers (builtin registration, etc.) get discarded without /WHOLEARCHIVE.
+    # Requires clean libnode.lib without exe objects (build-libnode filters them).
+    target_link_options(wasmcart PUBLIC "/WHOLEARCHIVE:${LIBNODE_DIR}/libnode.lib")
+    target_link_libraries(wasmcart PUBLIC ${LIBNODE_DIR}/libnode.lib winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
 else()
     target_link_libraries(wasmcart PUBLIC ${LIBNODE_DIR}/libnode.a pthread dl m)
 endif()
