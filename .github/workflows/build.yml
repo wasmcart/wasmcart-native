@@ -27,6 +27,17 @@ jobs:
           curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-linux-x86_64.tar.gz | tar xz -C deps/libnode
       - name: Build
         run: mkdir build && cd build && cmake .. && make -j$(nproc)
+      - name: Smoke test
+        run: |
+          # V8 + WASM init test — SDL will fail (no display) but cart should load
+          timeout 5 build/wasmcart-run test/snake.wasc 2>&1 | tee /tmp/smoke.log || true
+          if grep -q "loaded snake" /tmp/smoke.log; then
+            echo "PASS: V8 initialized, cart loaded"
+          else
+            echo "FAIL: cart did not load"
+            cat /tmp/smoke.log
+            exit 1
+          fi
       - name: Package
         run: |
           strip build/wasmcart-run
@@ -53,6 +64,16 @@ jobs:
           curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-linux-aarch64.tar.gz | tar xz -C deps/libnode
       - name: Build
         run: mkdir build && cd build && cmake .. && make -j$(nproc)
+      - name: Smoke test
+        run: |
+          timeout 5 build/wasmcart-run test/snake.wasc 2>&1 | tee /tmp/smoke.log || true
+          if grep -q "loaded snake" /tmp/smoke.log; then
+            echo "PASS: V8 initialized, cart loaded"
+          else
+            echo "FAIL: cart did not load"
+            cat /tmp/smoke.log
+            exit 1
+          fi
       - name: Package
         run: |
           strip build/wasmcart-run
@@ -83,6 +104,16 @@ jobs:
           mkdir build && cd build
           cmake .. -DANGLE_DIR=../deps/angle
           make -j$(sysctl -n hw.ncpu)
+      - name: Smoke test
+        run: |
+          timeout 5 build/wasmcart-run test/snake.wasc 2>&1 | tee /tmp/smoke.log || true
+          if grep -q "loaded snake" /tmp/smoke.log; then
+            echo "PASS: V8 initialized, cart loaded"
+          else
+            echo "FAIL: cart did not load"
+            cat /tmp/smoke.log
+            exit 1
+          fi
       - name: Package
         run: |
           strip build/wasmcart-run
@@ -113,6 +144,16 @@ jobs:
           mkdir build && cd build
           cmake .. -DANGLE_DIR=../deps/angle
           make -j$(sysctl -n hw.ncpu)
+      - name: Smoke test
+        run: |
+          timeout 5 build/wasmcart-run test/snake.wasc 2>&1 | tee /tmp/smoke.log || true
+          if grep -q "loaded snake" /tmp/smoke.log; then
+            echo "PASS: V8 initialized, cart loaded"
+          else
+            echo "FAIL: cart did not load"
+            cat /tmp/smoke.log
+            exit 1
+          fi
       - name: Package
         run: |
           strip build/wasmcart-run
@@ -166,11 +207,22 @@ jobs:
           cd build
           cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL2_DIR=..\deps\SDL2 -DANGLE_DIR=..\deps\angle -DLIBNODE_DIR=..\deps\libnode
           ninja
-      - name: Package
+      - name: Smoke test
         shell: bash
         run: |
           cp deps/SDL2/lib/x64/SDL2.dll build/ 2>/dev/null || true
           cp deps/angle/lib/*.dll build/ 2>/dev/null || true
+          timeout 5 build/wasmcart-run.exe test/snake.wasc 2>&1 | tee /tmp/smoke.log || true
+          if grep -q "loaded snake" /tmp/smoke.log; then
+            echo "PASS: V8 initialized, cart loaded"
+          else
+            echo "FAIL: cart did not load"
+            cat /tmp/smoke.log
+            exit 1
+          fi
+      - name: Package
+        shell: bash
+        run: |
           cd build
           7z a ../wasmcart-native-windows-x86_64.zip wasmcart-run.exe SDL2.dll libEGL.dll libGLESv2.dll
       - uses: actions/upload-artifact@v7
