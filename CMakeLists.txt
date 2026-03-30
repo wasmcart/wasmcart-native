@@ -80,13 +80,13 @@ set(SDL2_DIR "" CACHE PATH "Path to SDL2 (Windows)")
 if(WIN32 AND SDL2_DIR)
     target_include_directories(wasmcart-run PRIVATE ${SDL2_DIR}/include)
     target_link_libraries(wasmcart-run PRIVATE ${SDL2_DIR}/lib/x64/SDL2.lib ${SDL2_DIR}/lib/x64/SDL2main.lib)
-    set(SDL2_STATIC "win32-manual")
+    set(SDL2_HANDLED TRUE)
 elseif(NOT WIN32)
     find_library(SDL2_STATIC libSDL2.a PATHS
         /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/local/lib
         /opt/homebrew/lib /usr/local/opt/sdl2/lib)
 endif()
-if(SDL2_STATIC)
+if(SDL2_STATIC AND NOT SDL2_HANDLED)
     message(STATUS "Using static SDL2: ${SDL2_STATIC}")
     target_link_libraries(wasmcart-run PRIVATE ${SDL2_STATIC})
     # Platform-specific SDL2 system deps
