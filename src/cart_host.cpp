@@ -2,6 +2,16 @@
 // Drop-in replacement for cart_host.c (wasmtime version).
 // All public API (wasmcart_host.h) stays identical.
 
+// Provide the snapshot stub that libnode.a references but doesn't include.
+// Embedders don't use snapshots — return null.
+namespace node {
+class SnapshotBuilder {
+public:
+    static const void* GetEmbeddedSnapshotData();
+};
+const void* SnapshotBuilder::GetEmbeddedSnapshotData() { return nullptr; }
+}
+
 #include "node.h"
 #include "v8.h"
 #include "v8-wasm.h"
