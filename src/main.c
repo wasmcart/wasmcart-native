@@ -296,8 +296,9 @@ int main(int argc, char* argv[]) {
 #endif
             egl_make_current();
             if (uncapped) {
-                extern EGLDisplay egl_get_display(void);
-                eglSwapInterval(egl_get_display(), 0);
+                extern void* egl_get_display(void);
+                EGLBoolean ok = eglSwapInterval((EGLDisplay)egl_get_display(), 0);
+                fprintf(stderr, "wasmcart: eglSwapInterval(0) = %s\n", ok ? "OK" : "FAILED");
             }
             // Set up FBO redirect for GL carts
             {

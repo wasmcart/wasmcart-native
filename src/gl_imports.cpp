@@ -7,6 +7,8 @@
 extern "C" {
 #include "cart_host.h"
 #include <GLES3/gl3.h>
+#include <GLES3/gl31.h>
+#include <GLES3/gl32.h>
 #include <GLES2/gl2ext.h>
 #include <string.h>
 #include <stdio.h>
@@ -568,6 +570,72 @@ GL_REG(glUnmapBuffer, 1, 1, R_I32(glUnmapBuffer(A_U32(0))))
 GL_REG(glVertexAttrib4fv, 2, 0, glVertexAttrib4fv(A_U32(0), (const GLfloat*)wptr(A_U32(1))))
 GL_REG(glTexParameteriv, 3, 0, glTexParameteriv(A_U32(0), A_U32(1), (const GLint*)wptr(A_U32(2))))
 
+// ─── GLES 3.1+ functions needed by Skia Ganesh ──────────────────────────
+
+GL_REG(glMemoryBarrier, 1, 0, glMemoryBarrier(A_U32(0)))
+GL_REG(glTexBuffer, 3, 0, glTexBuffer(A_U32(0), A_U32(1), A_U32(2)))
+GL_REG(glTexBufferRange, 5, 0, glTexBufferRange(A_U32(0), A_U32(1), A_U32(2), A_I32(3), A_I32(4)))
+GL_REG(glPatchParameteri, 2, 0, glPatchParameteri(A_U32(0), A_I32(1)))
+GL_REG(glDrawArraysIndirect, 2, 0, glDrawArraysIndirect(A_U32(0), (const void*)(uintptr_t)A_U32(1)))
+GL_REG(glDrawElementsIndirect, 3, 0, glDrawElementsIndirect(A_U32(0), A_U32(1), (const void*)(uintptr_t)A_U32(2)))
+GL_REG(glGetMultisamplefv, 3, 0, glGetMultisamplefv(A_U32(0), A_U32(1), (GLfloat*)wptr(A_U32(2))))
+GL_REG(glGetTexLevelParameteriv, 4, 0, glGetTexLevelParameteriv(A_U32(0), A_I32(1), A_U32(2), (GLint*)wptr(A_U32(3))))
+GL_REG(glBindFragDataLocation, 3, 0, { /* not in GLES — no-op */ })
+GL_REG(glBindFragDataLocationIndexed, 4, 0, { /* not in GLES — no-op */ })
+GL_REG(glBlendBarrier, 0, 0, glBlendBarrier())
+GL_REG(glBlendBarrierKHR, 0, 0, glBlendBarrier())
+GL_REG(glDiscardFramebufferEXT, 3, 0, glInvalidateFramebuffer(A_U32(0), A_I32(1), (const GLenum*)wptr(A_U32(2))))
+GL_REG(glInvalidateFramebuffer, 3, 0, glInvalidateFramebuffer(A_U32(0), A_I32(1), (const GLenum*)wptr(A_U32(2))))
+
+// Skia debug/label functions — no-op stubs
+GL_REG(glDebugMessageCallback, 2, 0, { /* no-op */ })
+GL_REG(glDebugMessageCallbackKHR, 2, 0, { /* no-op */ })
+GL_REG(glDebugMessageControl, 6, 0, { /* no-op */ })
+GL_REG(glDebugMessageControlKHR, 6, 0, { /* no-op */ })
+GL_REG(glDebugMessageInsert, 6, 0, { /* no-op */ })
+GL_REG(glDebugMessageInsertKHR, 6, 0, { /* no-op */ })
+GL_REG(glGetDebugMessageLog, 8, 1, R_I32(0))
+GL_REG(glGetDebugMessageLogKHR, 8, 1, R_I32(0))
+GL_REG(glObjectLabel, 4, 0, { /* no-op */ })
+GL_REG(glObjectLabelKHR, 4, 0, { /* no-op */ })
+GL_REG(glPopDebugGroup, 0, 0, { /* no-op */ })
+GL_REG(glPopDebugGroupKHR, 0, 0, { /* no-op */ })
+GL_REG(glPushDebugGroup, 4, 0, { /* no-op */ })
+GL_REG(glPushDebugGroupKHR, 4, 0, { /* no-op */ })
+GL_REG(glWindowRectanglesEXT, 3, 0, { /* no-op — extension not available */ })
+
+// Timer queries
+GL_REG(glQueryCounterEXT, 2, 0, { /* no-op */ })
+GL_REG(glGetQueryObjecti64v, 3, 0, { int64_t zero = 0; memcpy(wptr(A_U32(2)), &zero, 8); })
+GL_REG(glGetQueryObjecti64vEXT, 3, 0, { int64_t zero = 0; memcpy(wptr(A_U32(2)), &zero, 8); })
+GL_REG(glGetQueryObjectui64v, 3, 0, { uint64_t zero = 0; memcpy(wptr(A_U32(2)), &zero, 8); })
+GL_REG(glGetQueryObjectui64vEXT, 3, 0, { uint64_t zero = 0; memcpy(wptr(A_U32(2)), &zero, 8); })
+
+// Multi-draw indirect
+GL_REG(glMultiDrawArraysIndirect, 4, 0, { /* no-op — fallback to individual draws */ })
+GL_REG(glMultiDrawArraysIndirectEXT, 4, 0, { /* no-op */ })
+GL_REG(glMultiDrawElementsIndirect, 5, 0, { /* no-op */ })
+GL_REG(glMultiDrawElementsIndirectEXT, 5, 0, { /* no-op */ })
+
+// Instance drawing with base
+GL_REG(glDrawArraysInstancedBaseInstance, 5, 0, { /* not in GLES — no-op */ })
+GL_REG(glDrawArraysInstancedBaseInstanceEXT, 5, 0, { /* no-op */ })
+GL_REG(glDrawElementsInstancedBaseVertexBaseInstance, 7, 0, { /* no-op */ })
+GL_REG(glDrawElementsInstancedBaseVertexBaseInstanceEXT, 7, 0, { /* no-op */ })
+
+// Texture clear
+GL_REG(glClearTexImage, 5, 0, { /* not in GLES — no-op */ })
+GL_REG(glClearTexImageEXT, 5, 0, { /* no-op */ })
+GL_REG(glClearTexSubImage, 9, 0, { /* not in GLES — no-op */ })
+GL_REG(glClearTexSubImageEXT, 9, 0, { /* no-op */ })
+
+// Texture barrier
+GL_REG(glTextureBarrier, 0, 0, { /* no-op */ })
+GL_REG(glTextureBarrierNV, 0, 0, { /* no-op */ })
+
+// Map buffer (OES variant)
+GL_REG(glMapBufferOES, 2, 1, R_I32(0))
+
 // ─── Registration table ───────────────────────────────────────────────────
 
 typedef void (*v8_gl_callback_t)(const v8::FunctionCallbackInfo<v8::Value>&);
@@ -688,6 +756,39 @@ static const gl_import_entry_t gl_table[] = {
     GL_E(glMapBufferRange, "iiii>i"), GL_E(glUnmapBuffer, "i>i"),
     // Extra attribs/params
     GL_E(glVertexAttrib4fv, "ii>"), GL_E(glTexParameteriv, "iii>"),
+    // GLES 3.1+ / Skia Ganesh
+    GL_E(glMemoryBarrier, "i>"), GL_E(glTexBuffer, "iii>"), GL_E(glTexBufferRange, "iiiii>"),
+    GL_E(glPatchParameteri, "ii>"),
+    GL_E(glDrawArraysIndirect, "ii>"), GL_E(glDrawElementsIndirect, "iii>"),
+    GL_E(glGetMultisamplefv, "iii>"), GL_E(glGetTexLevelParameteriv, "iiii>"),
+    GL_E(glBindFragDataLocation, "iii>"), GL_E(glBindFragDataLocationIndexed, "iiii>"),
+    GL_E(glBlendBarrier, ">"), GL_E(glBlendBarrierKHR, ">"),
+    GL_E(glDiscardFramebufferEXT, "iii>"), GL_E(glInvalidateFramebuffer, "iii>"),
+    // Debug
+    GL_E(glDebugMessageCallback, "ii>"), GL_E(glDebugMessageCallbackKHR, "ii>"),
+    GL_E(glDebugMessageControl, "iiiiii>"), GL_E(glDebugMessageControlKHR, "iiiiii>"),
+    GL_E(glDebugMessageInsert, "iiiiii>"), GL_E(glDebugMessageInsertKHR, "iiiiii>"),
+    GL_E(glGetDebugMessageLog, "iiiiiiii>i"), GL_E(glGetDebugMessageLogKHR, "iiiiiiii>i"),
+    GL_E(glObjectLabel, "iiii>"), GL_E(glObjectLabelKHR, "iiii>"),
+    GL_E(glPopDebugGroup, ">"), GL_E(glPopDebugGroupKHR, ">"),
+    GL_E(glPushDebugGroup, "iiii>"), GL_E(glPushDebugGroupKHR, "iiii>"),
+    GL_E(glWindowRectanglesEXT, "iii>"),
+    // Timer queries
+    GL_E(glQueryCounterEXT, "ii>"),
+    GL_E(glGetQueryObjecti64v, "iii>"), GL_E(glGetQueryObjecti64vEXT, "iii>"),
+    GL_E(glGetQueryObjectui64v, "iii>"), GL_E(glGetQueryObjectui64vEXT, "iii>"),
+    // Multi-draw indirect
+    GL_E(glMultiDrawArraysIndirect, "iiii>"), GL_E(glMultiDrawArraysIndirectEXT, "iiii>"),
+    GL_E(glMultiDrawElementsIndirect, "iiiii>"), GL_E(glMultiDrawElementsIndirectEXT, "iiiii>"),
+    // Instance base
+    GL_E(glDrawArraysInstancedBaseInstance, "iiiii>"), GL_E(glDrawArraysInstancedBaseInstanceEXT, "iiiii>"),
+    GL_E(glDrawElementsInstancedBaseVertexBaseInstance, "iiiiiii>"), GL_E(glDrawElementsInstancedBaseVertexBaseInstanceEXT, "iiiiiii>"),
+    // Texture clear/barrier
+    GL_E(glClearTexImage, "iiiii>"), GL_E(glClearTexImageEXT, "iiiii>"),
+    GL_E(glClearTexSubImage, "iiiiiiiii>"), GL_E(glClearTexSubImageEXT, "iiiiiiiii>"),
+    GL_E(glTextureBarrier, ">"), GL_E(glTextureBarrierNV, ">"),
+    // Map buffer OES
+    GL_E(glMapBufferOES, "ii>i"),
     // End
     { NULL, NULL, NULL }
 };

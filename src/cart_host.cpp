@@ -253,6 +253,7 @@ static void v8_noop_return_0(const v8::FunctionCallbackInfo<v8::Value>& args) {
     args.GetReturnValue().Set(0);
 }
 
+
 // Build the env import object
 static v8::Local<v8::Object> build_env_imports() {
     auto env = v8::Object::New(g_isolate);
