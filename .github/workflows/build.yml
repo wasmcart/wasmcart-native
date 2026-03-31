@@ -106,6 +106,7 @@ jobs:
           make -j$(sysctl -n hw.ncpu)
       - name: Smoke test
         run: |
+          cp deps/angle/lib/*.dylib build/
           (build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 & PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null) || true
           if grep -q "loaded snake" /tmp/smoke.log; then
             echo "PASS: V8 initialized, cart loaded"
@@ -117,7 +118,6 @@ jobs:
       - name: Package
         run: |
           strip build/wasmcart-run
-          cp deps/angle/lib/*.dylib build/
           tar czf wasmcart-native-macos-x86_64.tar.gz -C build wasmcart-run libEGL.dylib libGLESv2.dylib
       - uses: actions/upload-artifact@v7
         with:
@@ -146,6 +146,7 @@ jobs:
           make -j$(sysctl -n hw.ncpu)
       - name: Smoke test
         run: |
+          cp deps/angle/lib/*.dylib build/
           (build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 & PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null) || true
           if grep -q "loaded snake" /tmp/smoke.log; then
             echo "PASS: V8 initialized, cart loaded"
@@ -157,7 +158,6 @@ jobs:
       - name: Package
         run: |
           strip build/wasmcart-run
-          cp deps/angle/lib/*.dylib build/
           tar czf wasmcart-native-macos-aarch64.tar.gz -C build wasmcart-run libEGL.dylib libGLESv2.dylib
       - uses: actions/upload-artifact@v7
         with:
