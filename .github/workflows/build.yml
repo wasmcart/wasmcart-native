@@ -30,8 +30,7 @@ jobs:
       - name: Smoke test
         run: |
           # V8 + WASM init test — SDL will fail (no display) but cart should load
-          build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 &
-          PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
+          (build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 & PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null) || true
           if grep -q "loaded snake" /tmp/smoke.log; then
             echo "PASS: V8 initialized, cart loaded"
           else
@@ -67,8 +66,7 @@ jobs:
         run: mkdir build && cd build && cmake .. && make -j$(nproc)
       - name: Smoke test
         run: |
-          build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 &
-          PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
+          (build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 & PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null) || true
           if grep -q "loaded snake" /tmp/smoke.log; then
             echo "PASS: V8 initialized, cart loaded"
           else
@@ -108,8 +106,7 @@ jobs:
           make -j$(sysctl -n hw.ncpu)
       - name: Smoke test
         run: |
-          build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 &
-          PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
+          (build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 & PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null) || true
           if grep -q "loaded snake" /tmp/smoke.log; then
             echo "PASS: V8 initialized, cart loaded"
           else
@@ -149,8 +146,7 @@ jobs:
           make -j$(sysctl -n hw.ncpu)
       - name: Smoke test
         run: |
-          build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 &
-          PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
+          (build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 & PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null) || true
           if grep -q "loaded snake" /tmp/smoke.log; then
             echo "PASS: V8 initialized, cart loaded"
           else
@@ -216,8 +212,7 @@ jobs:
         run: |
           cp deps/SDL2/lib/x64/SDL2.dll build/ 2>/dev/null || true
           cp deps/angle/lib/*.dll build/ 2>/dev/null || true
-          build/wasmcart-run.exe test/snake.wasc > /tmp/smoke.log 2>&1 &
-          PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
+          (build/wasmcart-run.exe test/snake.wasc > /tmp/smoke.log 2>&1 & PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null) || true
           if grep -q "loaded snake" /tmp/smoke.log; then
             echo "PASS: V8 initialized, cart loaded"
           else
