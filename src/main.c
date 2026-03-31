@@ -468,6 +468,22 @@ int main(int argc, char* argv[]) {
         // Run frame
         wc_host_run_frame(host);
 
+        // After first frame: cart may have resized (Godot reads host_info and reconfigures)
+        // Resize redirect FBO to match actual render dimensions
+        if (frame_count == 0 && egl_is_initialized()) {
+            const wc_cart_info_t* new_info = wc_host_get_cart_info(host);
+            if (new_info->width != cart_w || new_info->height != cart_h) {
+                cart_w = new_info->width;
+                cart_h = new_info->height;
+                uint32_t redir_w = pref_width > cart_w ? pref_width : cart_w;
+                uint32_t redir_h = pref_height > cart_h ? pref_height : cart_h;
+                extern void wc_gl_setup_redirect(uint32_t width, uint32_t height);
+                wc_gl_setup_redirect(redir_w, redir_h);
+                fprintf(stderr, "wasmcart: resized redirect FBO to %ux%u (cart=%ux%u)\n",
+                    redir_w, redir_h, cart_w, cart_h);
+            }
+        }
+
         if (wc_host_has_trapped(host)) {
             fprintf(stderr, "wasmcart: cart trapped, exiting\n");
             running = false;
