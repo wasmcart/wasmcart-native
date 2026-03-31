@@ -142,14 +142,7 @@ GL_REG(glHint, 2, 0, glHint(A_U32(0), A_U32(1)))
 GL_REG(glPixelStorei, 2, 0, glPixelStorei(A_U32(0), A_I32(1)))
 GL_REG(glIsEnabled, 1, 1, R_I32(glIsEnabled(A_U32(0))))
 
-GL_REG(glGetIntegerv, 2, 0, {
-    uint32_t pname = A_U32(0);
-    if (pname == 0x821D) { // GL_NUM_EXTENSIONS — return filtered count
-        *(GLint*)wptr(A_U32(1)) = _num_filtered_extensions;
-    } else {
-        glGetIntegerv(pname, (GLint*)wptr(A_U32(1)));
-    }
-})
+GL_REG(glGetIntegerv, 2, 0, glGetIntegerv(A_U32(0), (GLint*)wptr(A_U32(1))))
 GL_REG(glGetFloatv, 2, 0, glGetFloatv(A_U32(0), (GLfloat*)wptr(A_U32(1))))
 GL_REG(glGetBooleanv, 2, 0, glGetBooleanv(A_U32(0), (GLboolean*)wptr(A_U32(1))))
 GL_REG(glGetInternalformativ, 5, 0,
@@ -190,14 +183,12 @@ GL_REG(glGetString, 1, 1, {
     // Report ES 3.0 and filtered extensions to match Node.js/WebGL2 host behavior.
     // Native Mesa reports ES 3.2 with many extensions — Skia then requires function pointers
     // for those extensions which the cart's MAP table doesn't have.
-    if (name == 0x1F02) s = "OpenGL ES 3.0 wasmcart"; // GL_VERSION
-    // Don't override GL_SHADING_LANGUAGE_VERSION — let Mesa report real version.
-    // ioquake3 uses #version 100 shaders that need the real GLSL 3.x compiler for sampler2DShadow.
-    if (name == 0x1F03) { // GL_EXTENSIONS — return WebGL2-compatible subset
-        s = "GL_EXT_texture_filter_anisotropic GL_OES_texture_float_linear "
-            "GL_EXT_color_buffer_float GL_EXT_float_blend GL_OES_packed_depth_stencil "
-            "GL_OES_texture_npot GL_EXT_texture_norm16";
-    }
+    // Cap to ES 3.0 — wasmcart ABI = WebGL2 = ES 3.0 max
+    if (name == 0x1F02) s = "OpenGL ES 3.0 wasmcart";
+    // GL_EXTENSIONS via glGetString: empty. Ganesh (on ES 3.0) uses this to probe extensions.
+    // Empty = no extension probing = no missing function pointer failures.
+    // Godot uses glGetStringi (indexed query) which passes through real extensions.
+    // GL_EXTENSIONS: pass through real (Godot needs them)
     if (!s) { R_I32(0); } else {
         int idx = (name == 0x1F00) ? 0 : (name == 0x1F01) ? 1 : (name == 0x1F02) ? 2 :
                   (name == 0x1F03) ? 3 : (name == 0x8B8C) ? 4 : 5;
@@ -476,18 +467,17 @@ GL_REG(glReadBuffer, 1, 0, glReadBuffer(A_U32(0)))
 GL_REG(glGetStringi, 2, 1, {
     uint32_t name = A_U32(0);
     uint32_t index = A_U32(1);
-    if (name == 0x1F03) { // GL_EXTENSIONS — return filtered list
-        const char* s = (index < (uint32_t)_num_filtered_extensions) ? _filtered_extensions[index] : NULL;
-        if (!s) { R_I32(0); } else {
-            uint32_t ptr = _gl_alloc_string(_host, s);
-            R_I32(ptr);
+    const char* s = (const char*)glGetStringi(name, index);
+    {
+        static int _si_dbg = 0;
+        if (_si_dbg < 3 && name == 0x1F03 && s) {
+            fprintf(stderr, "wasmcart: glGetStringi(GL_EXTENSIONS, %u) = %s\n", index, s);
+            _si_dbg++;
         }
-    } else {
-        const char* s = (const char*)glGetStringi(name, index);
-        if (!s) { R_I32(0); } else {
-            uint32_t ptr = _gl_alloc_string(_host, s);
-            R_I32(ptr);
-        }
+    }
+    if (!s) { R_I32(0); } else {
+        uint32_t ptr = _gl_alloc_string(_host, s);
+        R_I32(ptr);
     }
 })
 GL_REG(glGetInteger64v, 2, 0, glGetInteger64v(A_U32(0), (GLint64*)wptr(A_U32(1))))
