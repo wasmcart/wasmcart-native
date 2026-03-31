@@ -879,6 +879,15 @@ extern "C" void wc_gl_get_blit_size(uint32_t* w, uint32_t* h) {
 
 extern "C" int wc_gl_get_redirect_fbo(void) { return _redirect_fbo; }
 
+// Set redirect to an external FBO (e.g. RetroArch's hw_render FBO).
+// Cart's glBindFramebuffer(0) will bind this FBO directly — no intermediate blit needed.
+extern "C" void wc_gl_set_redirect_fbo(uint32_t fbo, uint32_t width, uint32_t height) {
+    _redirect_fbo = fbo;
+    _redirect_w = width;
+    _redirect_h = height;
+    _last_draw_fbo = fbo;
+}
+
 extern "C" void wc_gl_setup_redirect(uint32_t width, uint32_t height) {
     _ensure_redirect_fbo(width, height);
 }
