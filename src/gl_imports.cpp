@@ -402,7 +402,18 @@ GL_REG(glVertexAttribDivisor, 2, 0, glVertexAttribDivisor(A_U32(0), A_U32(1)))
 
 GL_REG(glGenVertexArrays, 2, 0, glGenVertexArrays(A_I32(0), (GLuint*)wptr(A_U32(1))))
 GL_REG(glDeleteVertexArrays, 2, 0, glDeleteVertexArrays(A_I32(0), (const GLuint*)wptr(A_U32(1))))
-GL_REG(glBindVertexArray, 1, 0, glBindVertexArray(A_U32(0)))
+// On Core 3.3, drawing with VAO 0 is undefined behavior.
+// Ganesh (GLES interface) binds VAO 0 assuming it's always valid.
+// Redirect VAO 0 to a real default VAO.
+static GLuint _default_vao = 0;
+GL_REG(glBindVertexArray, 1, 0, {
+    GLuint vao = A_U32(0);
+    if (vao == 0) {
+        if (!_default_vao) glGenVertexArrays(1, &_default_vao);
+        vao = _default_vao;
+    }
+    glBindVertexArray(vao);
+})
 
 // ─── Drawing ──────────────────────────────────────────────────────────────
 
