@@ -867,6 +867,22 @@ extern "C" void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t
     _draw_call_count = 0;
 }
 
+extern "C" void wc_gl_rebind_redirect(void) {
+    if (!_redirect_fbo) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, _redirect_fbo);
+    glViewport(0, 0, _redirect_w, _redirect_h);
+    _last_draw_fbo = _redirect_fbo;
+    _cart_blitted_to_redirect = 0;
+    _draw_call_count = 0;
+}
+
+extern "C" void wc_gl_get_blit_size(uint32_t* w, uint32_t* h) {
+    *w = _cart_blit_w;
+    *h = _cart_blit_h;
+}
+
+extern "C" int wc_gl_get_redirect_fbo(void) { return _redirect_fbo; }
+
 extern "C" void wc_gl_setup_redirect(uint32_t width, uint32_t height) {
     _ensure_redirect_fbo(width, height);
 }
