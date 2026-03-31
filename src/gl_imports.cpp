@@ -177,29 +177,14 @@ static uint32_t _gl_alloc_string(wc_host_t* host, const char* s) {
     return 0;
 }
 
-// Detect desktop GL (Core 3.3) vs GLES (EGL)
-// RetroArch/GLX gives Core 3.3. wasmcart-native/EGL gives GLES3.
-static int _is_desktop_gl = -1;
-static int check_desktop_gl(void) {
-    if (_is_desktop_gl < 0) {
-        const char* ver = (const char*)glGetString(GL_VERSION);
-        _is_desktop_gl = (ver && strncmp(ver, "OpenGL ES", 9) != 0) ? 1 : 0;
-    }
-    return _is_desktop_gl;
-}
-
 GL_REG(glGetString, 1, 1, {
     uint32_t name = A_U32(0);
     const char* s = (const char*)glGetString(name);
-    // Cap GL version — wasmcart ABI = WebGL2 = ES 3.0 max.
-    // On GLES contexts: report ES 3.0 (prevents carts using ES 3.1+ core features)
-    // On desktop Core contexts: report 3.3 (Ganesh must generate desktop GLSL, not ES GLSL)
-    if (name == 0x1F02) {
-        if (check_desktop_gl())
-            s = "3.3.0 wasmcart";
-        else
-            s = "OpenGL ES 3.0 wasmcart";
-    }
+    // wasmcart ABI = WebGL2 = ES 3.0. Always report ES 3.0 regardless of actual context.
+    // Core 3.3 contexts (RetroArch/GLX) accept ES 3.0 shaders via GL_ARB_ES3_compatibility.
+    // Carts that use GPU engines (Ganesh) must hide extensions in their getProcAddress callback
+    // to prevent the engine from probing for function pointers not in the WASM import table.
+    if (name == 0x1F02) s = "OpenGL ES 3.0 wasmcart";
     if (!s) { R_I32(0); } else {
         int idx = (name == 0x1F00) ? 0 : (name == 0x1F01) ? 1 : (name == 0x1F02) ? 2 :
                   (name == 0x1F03) ? 3 : (name == 0x8B8C) ? 4 : 5;
