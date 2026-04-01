@@ -25,6 +25,8 @@ static wc_host_t* _host = NULL;
 static GLuint _redirect_fbo = 0;
 static GLuint _redirect_tex = 0;
 static uint32_t _redirect_w = 0, _redirect_h = 0;
+// Cart VAO — isolates cart's VAO 0 usage from host (RetroArch uses VAO 0 for overlays)
+static GLuint _cart_vao = 0;
 static GLuint _last_draw_fbo = 0;
 static int _cart_blitted_to_redirect = 0;
 static uint32_t _cart_blit_w = 0, _cart_blit_h = 0; // actual render size from cart's blit
@@ -403,7 +405,11 @@ GL_REG(glVertexAttribDivisor, 2, 0, glVertexAttribDivisor(A_U32(0), A_U32(1)))
 
 GL_REG(glGenVertexArrays, 2, 0, glGenVertexArrays(A_I32(0), (GLuint*)wptr(A_U32(1))))
 GL_REG(glDeleteVertexArrays, 2, 0, glDeleteVertexArrays(A_I32(0), (const GLuint*)wptr(A_U32(1))))
-GL_REG(glBindVertexArray, 1, 0, glBindVertexArray(A_U32(0)))
+GL_REG(glBindVertexArray, 1, 0, {
+    GLuint vao = A_U32(0);
+    if (vao == 0 && _cart_vao) vao = _cart_vao;
+    glBindVertexArray(vao);
+})
 
 // ─── Drawing ──────────────────────────────────────────────────────────────
 
@@ -538,6 +544,10 @@ static void _ensure_redirect_fbo(uint32_t w, uint32_t h) {
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo);
     _redirect_w = w; _redirect_h = h;
+    // Create cart VAO to isolate cart's vertex attrib state from host
+    if (!_cart_vao) {
+        glGenVertexArrays(1, &_cart_vao);
+    }
     // Set viewport so cart gets correct dimensions when querying
     glViewport(0, 0, w, h);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
