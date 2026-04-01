@@ -12,9 +12,10 @@ static FILE* _wc_log_file = NULL;
 static long _wc_log_bytes = 0;
 #define WC_LOG_MAX_BYTES (1L * 1024 * 1024)  // 1MB cap
 
-static inline void _wc_log_ensure_file(void) {
-    if (!_wc_log_file) {
-        _wc_log_file = fopen("/storage/emulated/0/racarts/wasmcart.log", "w");
+static inline void wc_log_set_file(const char* path) {
+    if (_wc_log_file) { fclose(_wc_log_file); _wc_log_file = NULL; }
+    if (path) {
+        _wc_log_file = fopen(path, "w");
         _wc_log_bytes = 0;
     }
 }
@@ -24,7 +25,6 @@ static inline void wc_log(const char* fmt, ...) {
     va_start(args, fmt);
     __android_log_vprint(ANDROID_LOG_INFO, WC_LOG_TAG, fmt, args);
     va_end(args);
-    _wc_log_ensure_file();
     if (_wc_log_file && _wc_log_bytes < WC_LOG_MAX_BYTES) {
         va_start(args, fmt);
         _wc_log_bytes += vfprintf(_wc_log_file, fmt, args);
@@ -38,7 +38,6 @@ static inline void wc_log_err(const char* fmt, ...) {
     va_start(args, fmt);
     __android_log_vprint(ANDROID_LOG_ERROR, WC_LOG_TAG, fmt, args);
     va_end(args);
-    _wc_log_ensure_file();
     if (_wc_log_file && _wc_log_bytes < WC_LOG_MAX_BYTES) {
         va_start(args, fmt);
         _wc_log_bytes += vfprintf(_wc_log_file, fmt, args);
@@ -48,6 +47,8 @@ static inline void wc_log_err(const char* fmt, ...) {
 }
 
 #else
+
+static inline void wc_log_set_file(const char* path) { (void)path; }
 
 static inline void wc_log(const char* fmt, ...) {
     va_list args;
