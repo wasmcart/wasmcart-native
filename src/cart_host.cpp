@@ -700,6 +700,11 @@ extern "C" int wc_host_finish_init(wc_host_t* host) {
         if (result.IsEmpty() && try_catch.HasCaught()) {
             v8::String::Utf8Value err(g_isolate, try_catch.Exception());
             wc_log("wasmcart: wc_init error: %s\n", *err);
+            auto stack = try_catch.StackTrace(ctx());
+            if (!stack.IsEmpty()) {
+                v8::String::Utf8Value st(g_isolate, stack.ToLocalChecked());
+                wc_log("wasmcart: stack: %s\n", *st);
+            }
             return -1;
         }
         refresh_memory(host);
