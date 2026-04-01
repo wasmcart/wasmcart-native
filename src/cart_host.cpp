@@ -218,7 +218,9 @@ static void v8_wc_log(const v8::FunctionCallbackInfo<v8::Value>& args) {
 }
 
 static void v8_emscripten_notify_memory_growth(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    uint32_t old_size = _current_host->memory_size;
     refresh_memory(_current_host);
+    wc_log("wasmcart: memory grew %u → %u bytes\n", old_size, _current_host->memory_size);
 }
 
 static void v8_emscripten_memcpy_js(const v8::FunctionCallbackInfo<v8::Value>& args) {
@@ -521,6 +523,8 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     if (!mem_val->IsUndefined()) {
         state->memory_obj.Reset(g_isolate, mem_val.As<v8::Object>());
         refresh_memory(host);
+        wc_log("wasmcart: initial WASM memory: %u bytes (%u MB)\n",
+            host->memory_size, host->memory_size / (1024*1024));
     }
 
     // Functions
