@@ -13,6 +13,7 @@ extern "C" {
 #include <string.h>
 #include <stdio.h>
 }
+#include "wc_log.h"
 
 // V8 context accessor — defined in cart_host.cpp
 extern v8::Isolate* g_isolate;
@@ -467,7 +468,7 @@ GL_REG(glGetStringi, 2, 1, {
     {
         static int _si_dbg = 0;
         if (_si_dbg < 3 && name == 0x1F03 && s) {
-            fprintf(stderr, "wasmcart: glGetStringi(GL_EXTENSIONS, %u) = %s\n", index, s);
+            wc_log( "wasmcart: glGetStringi(GL_EXTENSIONS, %u) = %s\n", index, s);
             _si_dbg++;
         }
     }
@@ -938,7 +939,7 @@ extern "C" void wc_gl_blit_to_screen(uint32_t cart_w, uint32_t cart_h, uint32_t 
 
 extern "C" void wc_gl_imports_init(wc_host_t* host) {
     _host = host;
-    fprintf(stderr, "wasmcart: GL imports registered (%s)\n",
+    wc_log( "wasmcart: GL imports registered (%s)\n",
         (const char*)glGetString(GL_RENDERER));
 }
 
@@ -955,6 +956,6 @@ extern "C" void wc_gl_build_v8_imports(v8::Isolate* isolate, v8::Local<v8::Conte
         env_obj->Set(context, name, fn).Check();
     }
 
-    fprintf(stderr, "wasmcart: GL imports registered (%d functions, %s)\n",
+    wc_log( "wasmcart: GL imports registered (%d functions, %s)\n",
         idx, (const char*)glGetString(GL_RENDERER));
 }

@@ -26,6 +26,7 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include "wc_log.h"
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -88,7 +89,7 @@ static int v8_init() {
         node::ProcessInitializationFlags::kNoInitializeNodeV8Platform
     });
     for (const std::string& err : result->errors()) {
-        fprintf(stderr, "wasmcart: v8 init error: %s\n", err.c_str());
+        wc_log( "wasmcart: v8 init error: %s\n", err.c_str());
     }
     if (result->early_return() != 0) return -1;
 
@@ -102,7 +103,7 @@ static int v8_init() {
         g_platform.get(), &errors, args, exec_args);
     if (!g_setup) {
         for (const std::string& err : errors)
-            fprintf(stderr, "wasmcart: %s\n", err.c_str());
+            wc_log( "wasmcart: %s\n", err.c_str());
         return -1;
     }
 
@@ -209,7 +210,7 @@ static void v8_wc_log(const v8::FunctionCallbackInfo<v8::Value>& args) {
     refresh_memory(_current_host);
     uint32_t ptr = args[0]->Uint32Value(ctx()).FromJust();
     uint32_t len = args[1]->Uint32Value(ctx()).FromJust();
-    fprintf(stderr, "wasmcart [cart]: %.*s\n", (int)len, (const char*)(_current_host->memory + ptr));
+    wc_log( "wasmcart [cart]: %.*s\n", (int)len, (const char*)(_current_host->memory + ptr));
 }
 
 static void v8_emscripten_notify_memory_growth(const v8::FunctionCallbackInfo<v8::Value>& args) {
@@ -247,7 +248,7 @@ static void v8_wc_load_asset(const v8::FunctionCallbackInfo<v8::Value>& args) {
     memcpy(path, _current_host->memory + path_ptr, len);
     path[len] = '\0';
     if (dest_ptr + max_size > _current_host->memory_size) {
-        fprintf(stderr, "wasmcart: asset %s: dest_ptr=%u + max_size=%u > memory_size=%u\n",
+        wc_log( "wasmcart: asset %s: dest_ptr=%u + max_size=%u > memory_size=%u\n",
             path, dest_ptr, max_size, _current_host->memory_size);
         args.GetReturnValue().Set(-1);
         return;
@@ -394,7 +395,7 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     // 1. Open archive and read wasm bytes
     int rc = wc_archive_open(host, wasc_path);
     if (rc != 0) {
-        fprintf(stderr, "wasmcart: failed to open %s\n", wasc_path);
+        wc_log( "wasmcart: failed to open %s\n", wasc_path);
         return rc;
     }
 
@@ -407,7 +408,7 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     if (maybe_module.IsEmpty()) {
         if (try_catch.HasCaught()) {
             v8::String::Utf8Value err(g_isolate, try_catch.Exception());
-            fprintf(stderr, "wasmcart: compile error: %s\n", *err);
+            wc_log( "wasmcart: compile error: %s\n", *err);
         }
         return -1;
     }
@@ -500,7 +501,7 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     if (instance_result.IsEmpty()) {
         if (try_catch.HasCaught()) {
             v8::String::Utf8Value err(g_isolate, try_catch.Exception());
-            fprintf(stderr, "wasmcart: instantiate error: %s\n", *err);
+            wc_log( "wasmcart: instantiate error: %s\n", *err);
         }
         return -1;
     }
@@ -532,7 +533,7 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     auto fn_malloc = get_fn("malloc");
 
     if (fn_get_info.IsEmpty() || fn_render.IsEmpty()) {
-        fprintf(stderr, "wasmcart: missing required exports (wc_get_info, wc_render)\n");
+        wc_log( "wasmcart: missing required exports (wc_get_info, wc_render)\n");
         return -1;
     }
 
@@ -581,11 +582,11 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     } else {
         // Normal path: run full init now
         if (!fn_initialize.IsEmpty()) {
-            fprintf(stderr, "wasmcart: calling _initialize\n");
+            wc_log( "wasmcart: calling _initialize\n");
             auto result = fn_initialize->Call(ctx(), ctx()->Global(), 0, nullptr);
             if (result.IsEmpty() && try_catch.HasCaught()) {
                 v8::String::Utf8Value err(g_isolate, try_catch.Exception());
-                fprintf(stderr, "wasmcart: _initialize error: %s\n", *err);
+                wc_log( "wasmcart: _initialize error: %s\n", *err);
             }
             refresh_memory(host);
         }
@@ -611,11 +612,11 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
             auto result = fn_init->Call(ctx(), ctx()->Global(), 0, nullptr);
             if (result.IsEmpty() && try_catch.HasCaught()) {
                 v8::String::Utf8Value err(g_isolate, try_catch.Exception());
-                fprintf(stderr, "wasmcart: wc_init error: %s\n", *err);
+                wc_log( "wasmcart: wc_init error: %s\n", *err);
                 auto stack = try_catch.StackTrace(ctx());
                 if (!stack.IsEmpty()) {
                     v8::String::Utf8Value st(g_isolate, stack.ToLocalChecked());
-                    fprintf(stderr, "wasmcart: stack: %s\n", *st);
+                    wc_log( "wasmcart: stack: %s\n", *st);
                 }
             }
             refresh_memory(host);
@@ -631,7 +632,7 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
         }
     } // end else (non-deferred init)
 
-    fprintf(stderr, "wasmcart: loaded %s (%ux%u, %s, ABI v%u)\n",
+    wc_log( "wasmcart: loaded %s (%ux%u, %s, ABI v%u)\n",
         host->manifest.name,
         host->info.width, host->info.height,
         host->uses_gl ? "GL" : "2D",
@@ -663,11 +664,11 @@ extern "C" int wc_host_finish_init(wc_host_t* host) {
 
     // Call _initialize
     if (!state->fn_initialize.IsEmpty()) {
-        fprintf(stderr, "wasmcart: calling _initialize (deferred)\n");
+        wc_log( "wasmcart: calling _initialize (deferred)\n");
         auto result = state->fn_initialize.Get(g_isolate)->Call(ctx(), ctx()->Global(), 0, nullptr);
         if (result.IsEmpty() && try_catch.HasCaught()) {
             v8::String::Utf8Value err(g_isolate, try_catch.Exception());
-            fprintf(stderr, "wasmcart: _initialize error: %s\n", *err);
+            wc_log( "wasmcart: _initialize error: %s\n", *err);
             return -1;
         }
         refresh_memory(host);
@@ -690,7 +691,7 @@ extern "C" int wc_host_finish_init(wc_host_t* host) {
         auto result = state->fn_wc_init.Get(g_isolate)->Call(ctx(), ctx()->Global(), 0, nullptr);
         if (result.IsEmpty() && try_catch.HasCaught()) {
             v8::String::Utf8Value err(g_isolate, try_catch.Exception());
-            fprintf(stderr, "wasmcart: wc_init error: %s\n", *err);
+            wc_log( "wasmcart: wc_init error: %s\n", *err);
             return -1;
         }
         refresh_memory(host);
@@ -707,7 +708,7 @@ extern "C" int wc_host_finish_init(wc_host_t* host) {
 
     host->init_deferred = false;
 
-    fprintf(stderr, "wasmcart: deferred init complete (%ux%u, %s)\n",
+    wc_log( "wasmcart: deferred init complete (%ux%u, %s)\n",
         host->info.width, host->info.height,
         host->uses_gl ? "GL" : "2D");
 
@@ -775,7 +776,7 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
 
     if (result.IsEmpty() && try_catch.HasCaught()) {
         v8::String::Utf8Value err(g_isolate, try_catch.Exception());
-        fprintf(stderr, "wasmcart: wc_render trapped: %s\n", *err);
+        wc_log( "wasmcart: wc_render trapped: %s\n", *err);
         host->trapped = true;
         return;
     }

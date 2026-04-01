@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include "wc_log.h"
 
 // ─── Archive open/close ────────────────────────────────────────────────────
 
@@ -44,15 +45,10 @@ int wc_archive_open(wc_host_t* host, const char* path) {
         return 0;
     }
 
-    // .wasc ZIP archive
-    uint8_t* file_data;
-    size_t file_size;
-    if (read_file(path, &file_data, &file_size) != 0) return -1;
-
+    // .wasc ZIP archive — open from file (no need to load entire ZIP into RAM)
     mz_zip_archive* zip = calloc(1, sizeof(mz_zip_archive));
-    if (!mz_zip_reader_init_mem(zip, file_data, file_size, 0)) {
-        fprintf(stderr, "wasmcart: failed to open ZIP: %s\n", path);
-        free(file_data);
+    if (!mz_zip_reader_init_file(zip, path, 0)) {
+        wc_log("wasmcart: failed to open ZIP: %s\n", path);
         free(zip);
         return -1;
     }
@@ -81,27 +77,21 @@ int wc_archive_open(wc_host_t* host, const char* path) {
     const char* entry = host->manifest.entry[0] ? host->manifest.entry : "cart.wasm";
     idx = mz_zip_reader_locate_file(zip, entry, NULL, 0);
     if (idx < 0) {
-        fprintf(stderr, "wasmcart: entry '%s' not found in archive\n", entry);
+        wc_log("wasmcart: entry '%s' not found in archive\n", entry);
         mz_zip_reader_end(zip);
         free(zip);
-        free(file_data);
         host->archive = NULL;
         return -1;
     }
 
     host->wasm_bytes = mz_zip_reader_extract_to_heap(zip, idx, &host->wasm_bytes_len, 0);
     if (!host->wasm_bytes) {
-        fprintf(stderr, "wasmcart: failed to extract %s\n", entry);
+        wc_log("wasmcart: failed to extract %s\n", entry);
         mz_zip_reader_end(zip);
         free(zip);
-        free(file_data);
         host->archive = NULL;
         return -1;
     }
-
-    // Note: we keep file_data alive because mz_zip_reader_init_mem doesn't copy.
-    // The zip reader references it. We'll free it in wc_archive_close.
-    // Store it somewhere... for now leak it (TODO: store in host struct).
 
     return 0;
 }
@@ -174,7 +164,7 @@ int32_t wc_archive_load_asset(wc_host_t* host, const char* path, uint8_t* dest, 
     }
     if (idx < 0) {
         static int _miss = 0;
-        if (_miss < 3) { fprintf(stderr, "wasmcart: asset not found: %s\n", path); _miss++; }
+        if (_miss < 3) { wc_log( "wasmcart: asset not found: %s\n", path); _miss++; }
         return -1;
     }
 
@@ -183,16 +173,16 @@ int32_t wc_archive_load_asset(wc_host_t* host, const char* path, uint8_t* dest, 
 
     uint32_t read_size = (uint32_t)stat.m_uncomp_size;
     if (read_size > max_size) {
-        fprintf(stderr, "wasmcart: asset %s: size %u > max %u, truncating\n", path, read_size, max_size);
+        wc_log( "wasmcart: asset %s: size %u > max %u, truncating\n", path, read_size, max_size);
         read_size = max_size;
     }
 
     if (!mz_zip_reader_extract_to_mem(zip, idx, dest, read_size, 0)) {
-        fprintf(stderr, "wasmcart: asset %s: extract failed\n", path);
+        wc_log( "wasmcart: asset %s: extract failed\n", path);
         return -1;
     }
     static int _load = 0;
-    if (_load < 5) { fprintf(stderr, "wasmcart: loaded asset %s (%u bytes, max_size=%u, uncomp=%u)\n", path, read_size, max_size, (uint32_t)stat.m_uncomp_size); _load++; }
+    if (_load < 5) { wc_log( "wasmcart: loaded asset %s (%u bytes, max_size=%u, uncomp=%u)\n", path, read_size, max_size, (uint32_t)stat.m_uncomp_size); _load++; }
     return (int32_t)read_size;
 }
 
@@ -201,7 +191,7 @@ int32_t wc_archive_load_asset(wc_host_t* host, const char* path, uint8_t* dest, 
 int wc_parse_manifest(wc_host_t* host, const char* json, size_t len) {
     cJSON* root = cJSON_ParseWithLength(json, len);
     if (!root) {
-        fprintf(stderr, "wasmcart: failed to parse manifest.json\n");
+        wc_log( "wasmcart: failed to parse manifest.json\n");
         return -1;
     }
 
