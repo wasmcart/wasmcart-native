@@ -693,7 +693,7 @@ extern "C" int wc_host_finish_init(wc_host_t* host) {
         auto result = state->fn_wc_init.Get(g_isolate)->Call(ctx(), ctx()->Global(), 0, nullptr);
         if (result.IsEmpty() && try_catch.HasCaught()) {
             v8::String::Utf8Value err(g_isolate, try_catch.Exception());
-            wc_log( "wasmcart: wc_init error: %s\n", *err);
+            wc_log("wasmcart: wc_init error: %s\n", *err);
             return -1;
         }
         refresh_memory(host);
