@@ -842,7 +842,8 @@ static const gl_import_entry_t gl_table[] = {
 extern "C" int wc_gl_has_redirect(void) { return _redirect_fbo != 0; }
 
 // Blit redirect FBO to a specific target FBO (for libretro — target is RetroArch's FBO)
-extern "C" void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h) {
+// flip_y: when true, flips the image vertically during blit (needed for RetroArch GLES contexts)
+extern "C" void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h, int flip_y) {
     if (!_redirect_fbo) return;
     uint32_t src_w = _cart_blit_w ? _cart_blit_w : cart_w;
     uint32_t src_h = _cart_blit_h ? _cart_blit_h : cart_h;
@@ -853,8 +854,14 @@ extern "C" void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t
     glViewport(0, 0, src_w, src_h);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
-    glBlitFramebuffer(0, 0, src_w, src_h, 0, 0, src_w, src_h,
-        GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    if (flip_y) {
+        // Flip vertically: src bottom-left origin → dst top-left origin
+        glBlitFramebuffer(0, 0, src_w, src_h, 0, src_h, src_w, 0,
+            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    } else {
+        glBlitFramebuffer(0, 0, src_w, src_h, 0, 0, src_w, src_h,
+            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    }
 
     // Restore redirect FBO for next frame
     glBindFramebuffer(GL_FRAMEBUFFER, _redirect_fbo);
