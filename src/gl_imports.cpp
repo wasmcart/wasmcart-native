@@ -284,7 +284,17 @@ GL_REG(glTexStorage3D, 6, 0, glTexStorage3D(A_U32(0), A_I32(1), A_U32(2), A_I32(
 
 GL_REG(glCreateShader, 1, 1, R_I32(glCreateShader(A_U32(0))))
 GL_REG(glDeleteShader, 1, 0, glDeleteShader(A_U32(0)))
-GL_REG(glCompileShader, 1, 0, glCompileShader(A_U32(0)))
+GL_REG(glCompileShader, 1, 0, {
+    GLuint shader = A_U32(0);
+    glCompileShader(shader);
+    GLint ok = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetShaderInfoLog(shader, sizeof(log), NULL, log);
+        wc_log("wasmcart: shader %u compile FAILED: %s\n", shader, log);
+    }
+})
 GL_REG(glIsShader, 1, 1, R_I32(glIsShader(A_U32(0))))
 
 GL_REG(glShaderSource, 4, 0, {
@@ -315,7 +325,17 @@ GL_REG(glCreateProgram, 0, 1, R_I32(glCreateProgram()))
 GL_REG(glDeleteProgram, 1, 0, glDeleteProgram(A_U32(0)))
 GL_REG(glAttachShader, 2, 0, glAttachShader(A_U32(0), A_U32(1)))
 GL_REG(glDetachShader, 2, 0, glDetachShader(A_U32(0), A_U32(1)))
-GL_REG(glLinkProgram, 1, 0, glLinkProgram(A_U32(0)))
+GL_REG(glLinkProgram, 1, 0, {
+    GLuint prog = A_U32(0);
+    glLinkProgram(prog);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetProgramInfoLog(prog, sizeof(log), NULL, log);
+        wc_log("wasmcart: program %u link FAILED: %s\n", prog, log);
+    }
+})
 GL_REG(glUseProgram, 1, 0, glUseProgram(A_U32(0)))
 GL_REG(glIsProgram, 1, 1, R_I32(glIsProgram(A_U32(0))))
 GL_REG(glValidateProgram, 1, 0, glValidateProgram(A_U32(0)))
