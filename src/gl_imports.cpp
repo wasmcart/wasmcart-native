@@ -986,19 +986,21 @@ static void _init_fb_upload(void) {
 
     const char* vs_src =
         "#version 300 es\n"
+        "out vec2 vUV;\n"
         "void main() {\n"
-        "  vec2 pos = vec2(gl_VertexID & 1, (gl_VertexID >> 1) & 1) * 2.0 - 1.0;\n"
-        "  gl_Position = vec4(pos, 0.0, 1.0);\n"
+        "  float x = float((gl_VertexID & 1) << 2) - 1.0;\n"
+        "  float y = float((gl_VertexID & 2) << 1) - 1.0;\n"
+        "  vUV = vec2((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5);\n"
+        "  gl_Position = vec4(x, y, 0.0, 1.0);\n"
         "}\n";
     const char* fs_src =
         "#version 300 es\n"
         "precision mediump float;\n"
+        "in vec2 vUV;\n"
         "uniform sampler2D uTex;\n"
         "out vec4 fragColor;\n"
         "void main() {\n"
-        "  vec2 uv = gl_FragCoord.xy / vec2(textureSize(uTex, 0));\n"
-        "  uv.y = 1.0 - uv.y;\n"  // flip Y (framebuffer is top-down)
-        "  fragColor = texture(uTex, uv);\n"
+        "  fragColor = texture(uTex, vUV);\n"
         "}\n";
 
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
@@ -1033,9 +1035,11 @@ extern "C" void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
         GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
-    // Draw fullscreen quad to redirect FBO
+    // Draw fullscreen quad to redirect FBO at cart's resolution
     glBindFramebuffer(GL_FRAMEBUFFER, _redirect_fbo);
-    glViewport(0, 0, w, h);
+    glViewport(0, 0, _redirect_w, _redirect_h);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
@@ -1045,12 +1049,9 @@ extern "C" void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // Track blit size so downstream blit functions use correct source rect
-    _cart_blit_w = w;
-    _cart_blit_h = h;
+    _cart_blit_w = _redirect_w;
+    _cart_blit_h = _redirect_h;
     _cart_blitted_to_redirect = 1;
-
-    // Restore redirect FBO state
-    glViewport(0, 0, _redirect_w, _redirect_h);
 }
 
 extern "C" void wc_gl_imports_init(wc_host_t* host) {
