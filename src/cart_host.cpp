@@ -80,8 +80,7 @@ static int v8_init() {
 
     // Enable WASM exnref (standard exception handling) — same as --experimental-wasm-exnref
     v8::V8::SetFlagsFromString("--experimental-wasm-exnref");
-    // Allow WASM memory to grow up to 512MB (default may be too low on Android)
-    v8::V8::SetFlagsFromString("--wasm-max-mem-pages=8192");
+    // V8 default is unlimited WASM memory pages — don't restrict it
     // Optimize WASM↔JS transitions
     v8::V8::SetFlagsFromString("--turbo-inline-js-wasm-calls");
     v8::V8::SetFlagsFromString("--turbo-optimize-inlined-js-wasm-wrappers");
