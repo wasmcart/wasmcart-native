@@ -27,8 +27,8 @@ extern "C" {
 #include <string.h>
 #include <stdio.h>
 #include "wc_log.h"
-FILE* _wc_log_file = NULL;
-long _wc_log_bytes = 0;
+extern "C" FILE* _wc_log_file = NULL;
+extern "C" long _wc_log_bytes = 0;
 #ifdef _WIN32
 #include <windows.h>
 #endif

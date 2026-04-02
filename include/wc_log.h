@@ -8,8 +8,14 @@
 // On Android, logs go to both logcat and a file (logcat buffer is tiny).
 // On other platforms, logs go to stderr only.
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern FILE* _wc_log_file;
 extern long _wc_log_bytes;
+#ifdef __cplusplus
+}
+#endif
 #define WC_LOG_MAX_BYTES (1L * 1024 * 1024)  // 1MB cap
 
 static inline void wc_log_set_file(const char* path) {
