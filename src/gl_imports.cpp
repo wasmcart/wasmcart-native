@@ -33,6 +33,11 @@ static uint32_t _cart_blit_w = 0, _cart_blit_h = 0; // actual render size from c
 static int _fbo_log_frames = 0;
 static int _draw_call_count = 0;
 
+// 2D framebuffer upload to redirect FBO (unified GL display path)
+static GLuint _fb_upload_tex = 0;
+static GLuint _fb_upload_program = 0;
+static GLuint _fb_upload_vao = 0;
+
 // Filtered extension list — match WebGL2/Node.js host
 // Prevents Skia/Ganesh from requiring ES 3.1+ functions not in the WASM GL import table
 static const char* _filtered_extensions[] = {
@@ -972,6 +977,80 @@ extern "C" void wc_gl_blit_to_screen(uint32_t cart_w, uint32_t cart_h, uint32_t 
     _cart_blitted_to_redirect = 0;
     _last_draw_fbo = _redirect_fbo;
     _draw_call_count = 0;
+}
+
+// ─── Upload 2D framebuffer to redirect FBO (unified GL display path) ────────
+
+static void _init_fb_upload(void) {
+    if (_fb_upload_program) return;
+
+    const char* vs_src =
+        "#version 300 es\n"
+        "void main() {\n"
+        "  vec2 pos = vec2(gl_VertexID & 1, (gl_VertexID >> 1) & 1) * 2.0 - 1.0;\n"
+        "  gl_Position = vec4(pos, 0.0, 1.0);\n"
+        "}\n";
+    const char* fs_src =
+        "#version 300 es\n"
+        "precision mediump float;\n"
+        "uniform sampler2D uTex;\n"
+        "out vec4 fragColor;\n"
+        "void main() {\n"
+        "  vec2 uv = gl_FragCoord.xy / vec2(textureSize(uTex, 0));\n"
+        "  uv.y = 1.0 - uv.y;\n"  // flip Y (framebuffer is top-down)
+        "  fragColor = texture(uTex, uv);\n"
+        "}\n";
+
+    GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs, 1, &vs_src, NULL);
+    glCompileShader(vs);
+
+    GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, 1, &fs_src, NULL);
+    glCompileShader(fs);
+
+    _fb_upload_program = glCreateProgram();
+    glAttachShader(_fb_upload_program, vs);
+    glAttachShader(_fb_upload_program, fs);
+    glLinkProgram(_fb_upload_program);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    glGenVertexArrays(1, &_fb_upload_vao);
+    glGenTextures(1, &_fb_upload_tex);
+    glBindTexture(GL_TEXTURE_2D, _fb_upload_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+}
+
+extern "C" void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint32_t h) {
+    if (!_redirect_fbo || !pixels || w == 0 || h == 0) return;
+    _init_fb_upload();
+    if (!_fb_upload_program) return;
+
+    // Upload pixels as texture (ARGB8888 = BGRA byte order on little-endian)
+    glBindTexture(GL_TEXTURE_2D, _fb_upload_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+        GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+    // Draw fullscreen quad to redirect FBO
+    glBindFramebuffer(GL_FRAMEBUFFER, _redirect_fbo);
+    glViewport(0, 0, w, h);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    glUseProgram(_fb_upload_program);
+    glBindVertexArray(_fb_upload_vao);
+    glActiveTexture(GL_TEXTURE0);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    // Track blit size so downstream blit functions use correct source rect
+    _cart_blit_w = w;
+    _cart_blit_h = h;
+    _cart_blitted_to_redirect = 1;
+
+    // Restore redirect FBO state
+    glViewport(0, 0, _redirect_w, _redirect_h);
 }
 
 extern "C" void wc_gl_imports_init(wc_host_t* host) {
