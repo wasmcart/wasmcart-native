@@ -263,7 +263,19 @@ GL_REG(glBindBuffer, 2, 0, {
     glBindBuffer(target, buf);
 })
 GL_REG(glBufferData, 4, 0, glBufferData(A_U32(0), A_U32(1), wptr(A_U32(2)), A_U32(3)))
-GL_REG(glBufferSubData, 4, 0, glBufferSubData(A_U32(0), A_U32(1), A_U32(2), wptr(A_U32(3))))
+GL_REG(glBufferSubData, 4, 0, {
+    GLenum target = A_U32(0);
+    GLintptr offset = A_U32(1);
+    GLsizeiptr size = A_U32(2);
+    const void* data = wptr(A_U32(3));
+    // Buffer orphaning: if updating from offset 0, orphan first to avoid
+    // GPU sync stalls on mobile (Mali, Adreno). Driver allocates a new
+    // buffer instead of waiting for the GPU to finish with the old one.
+    if (offset == 0) {
+        glBufferData(target, size, NULL, GL_STREAM_DRAW);
+    }
+    glBufferSubData(target, offset, size, data);
+})
 GL_REG(glIsBuffer, 1, 1, R_I32(glIsBuffer(A_U32(0))))
 
 // ─── Textures ─────────────────────────────────────────────────────────────
