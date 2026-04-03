@@ -241,8 +241,10 @@ static const char* _build_extension_string(void) {
         NULL
     };
     for (int i = 0; gles_compat_exts[i]; i++) {
-        // Only add if not already present
-        if (!strstr(_ext_string_buf, gles_compat_exts[i])) {
+        // Only add if not already present (check with trailing space for exact match)
+        char search_buf[128];
+        snprintf(search_buf, sizeof(search_buf), "%s ", gles_compat_exts[i]);
+        if (!strstr(_ext_string_buf, search_buf)) {
             int len = strlen(gles_compat_exts[i]);
             if (offset + len + 1 < 16384) {
                 _ext_string_buf[offset++] = ' ';
@@ -250,6 +252,10 @@ static const char* _build_extension_string(void) {
                 offset += len;
             }
         }
+    }
+    // Trailing space — gl4es searches for "GL_EXT_xxx " (with space)
+    if (offset > 0 && _ext_string_buf[offset-1] != ' ') {
+        _ext_string_buf[offset++] = ' ';
     }
     _ext_string_buf[offset] = '\0';
     return _ext_string_buf;
