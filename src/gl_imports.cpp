@@ -350,9 +350,25 @@ GL_REG(glShaderSource, 4, 0, {
     const char* sources[16];
     int lens[16];
     int n = count > 16 ? 16 : count;
+    // Patch desktop GL version strings to GLES equivalents.
+    // gl4es generates #version 120 which GLES drivers reject.
+    static char patched_bufs[16][8192];
     for (int i = 0; i < n; i++) {
-        sources[i] = (const char*)wptr(wasm_ptrs[i]);
-        lens[i] = wasm_lens ? wasm_lens[i] : -1;
+        const char* src = (const char*)wptr(wasm_ptrs[i]);
+        int src_len = wasm_lens ? wasm_lens[i] : (int)strlen(src);
+        if (src_len > 0 && src_len < 8192 &&
+            (strncmp(src, "#version 120", 12) == 0 ||
+             strncmp(src, "#version 110", 12) == 0)) {
+            memcpy(patched_bufs[i], src, src_len);
+            patched_bufs[i][src_len] = '\0';
+            // Replace "#version 1x0" with "#version 100"
+            memcpy(patched_bufs[i], "#version 100", 12);
+            sources[i] = patched_bufs[i];
+            lens[i] = src_len;
+        } else {
+            sources[i] = src;
+            lens[i] = wasm_lens ? wasm_lens[i] : -1;
+        }
     }
     glShaderSource(shader, n, sources, wasm_lens ? lens : NULL);
 })
