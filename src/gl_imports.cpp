@@ -185,14 +185,35 @@ static uint32_t _gl_alloc_string(wc_host_t* host, const char* s) {
     return 0;
 }
 
+// Build extension string from glGetStringi (Core profile returns empty from glGetString)
+static char _ext_string_buf[8192] = {0};
+static const char* _build_extension_string(void) {
+    if (_ext_string_buf[0]) return _ext_string_buf;
+    GLint num_ext = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &num_ext);
+    int offset = 0;
+    for (int i = 0; i < num_ext && offset < 8000; i++) {
+        const char* ext = (const char*)glGetStringi(GL_EXTENSIONS, i);
+        if (ext) {
+            int len = strlen(ext);
+            if (offset + len + 1 < 8192) {
+                if (offset > 0) _ext_string_buf[offset++] = ' ';
+                memcpy(_ext_string_buf + offset, ext, len);
+                offset += len;
+            }
+        }
+    }
+    _ext_string_buf[offset] = '\0';
+    return _ext_string_buf;
+}
+
 GL_REG(glGetString, 1, 1, {
     uint32_t name = A_U32(0);
     const char* s = (const char*)glGetString(name);
     // wasmcart ABI = WebGL2 = ES 3.0. Always report ES 3.0 regardless of actual context.
-    // Core 3.3 contexts (RetroArch/GLX) accept ES 3.0 shaders via GL_ARB_ES3_compatibility.
-    // Carts that use GPU engines (Ganesh) must hide extensions in their getProcAddress callback
-    // to prevent the engine from probing for function pointers not in the WASM import table.
     if (name == 0x1F02) s = "OpenGL ES 3.0 wasmcart";
+    // Core profile returns empty for GL_EXTENSIONS — build from glGetStringi
+    if (name == 0x1F03 && (!s || s[0] == '\0')) s = _build_extension_string();
     if (!s) { R_I32(0); } else {
         int idx = (name == 0x1F00) ? 0 : (name == 0x1F01) ? 1 : (name == 0x1F02) ? 2 :
                   (name == 0x1F03) ? 3 : (name == 0x8B8C) ? 4 : 5;
@@ -500,12 +521,16 @@ GL_REG(glDrawArrays, 3, 0, {
     } else {
         glDrawArrays(mode, first, count);
     }
-    // Log GL errors on first 20 frames to diagnose path rendering issues
-    if (_draw_call_count < 2000) {
-        GLenum err = glGetError();
-        if (err) {
-            wc_log("wasmcart: GL error 0x%04x after glDrawArrays(mode=0x%x, first=%d, count=%d) draw#%d\n",
-                err, mode, first, count, _draw_call_count);
+    // Log first few GL errors to diagnose rendering issues
+    {
+        static int _gl_err_count = 0;
+        if (_gl_err_count < 5) {
+            GLenum err = glGetError();
+            if (err) {
+                _gl_err_count++;
+                wc_log("wasmcart: GL error 0x%04x after glDrawArrays(mode=0x%x, first=%d, count=%d) draw#%d\n",
+                    err, mode, first, count, _draw_call_count);
+            }
         }
     }
     _draw_call_count++;
