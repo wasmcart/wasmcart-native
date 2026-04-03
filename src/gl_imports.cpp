@@ -375,7 +375,43 @@ GL_REG(glTexParameterf, 3, 0, glTexParameterf(A_U32(0), A_U32(1), A_F32(2)))
 GL_REG(glGenerateMipmap, 1, 0, glGenerateMipmap(A_U32(0)))
 GL_REG(glIsTexture, 1, 1, R_I32(glIsTexture(A_U32(0))))
 
-GL_REG(glTexImage2D, 9, 0, glTexImage2D(A_U32(0), A_I32(1), A_I32(2), A_I32(3), A_I32(4), A_I32(5), A_U32(6), A_U32(7), wptr(A_U32(8))))
+// Fix unsized/legacy internal formats for ES 3.0/Core 3.3/WebGL2 compatibility
+static GLenum _fixInternalFormat(GLenum ifmt, GLenum type) {
+    if (type == GL_UNSIGNED_BYTE) {
+        switch (ifmt) {
+            case 0x1906: return 0x8229; // GL_ALPHA → GL_R8
+            case 0x1909: return 0x8229; // GL_LUMINANCE → GL_R8
+            case 0x190A: return 0x8227; // GL_LUMINANCE_ALPHA → GL_RG8
+            case 0x1907: return 0x8051; // GL_RGB → GL_RGB8
+            case 0x1908: return 0x8058; // GL_RGBA → GL_RGBA8
+            case 0x1903: return 0x8229; // GL_RED → GL_R8
+        }
+    } else if (type == GL_FLOAT) {
+        switch (ifmt) {
+            case 0x1907: return 0x8815; // GL_RGB → GL_RGB32F
+            case 0x1908: return 0x8814; // GL_RGBA → GL_RGBA32F
+        }
+    }
+    return ifmt;
+}
+static GLenum _fixFormat(GLenum fmt) {
+    switch (fmt) {
+        case 0x1906: return 0x1903; // GL_ALPHA → GL_RED
+        case 0x1909: return 0x1903; // GL_LUMINANCE → GL_RED
+        case 0x190A: return 0x8227; // GL_LUMINANCE_ALPHA → GL_RG
+        default: return fmt;
+    }
+}
+GL_REG(glTexImage2D, 9, 0, {
+    GLenum target = A_U32(0);
+    GLint level = A_I32(1);
+    GLenum ifmt = _fixInternalFormat(A_I32(2), A_U32(7));
+    GLsizei w = A_I32(3), h = A_I32(4);
+    GLint border = A_I32(5);
+    GLenum fmt = _fixFormat(A_U32(6));
+    GLenum type = A_U32(7);
+    glTexImage2D(target, level, ifmt, w, h, border, fmt, type, wptr(A_U32(8)));
+})
 GL_REG(glTexSubImage2D, 9, 0, glTexSubImage2D(A_U32(0), A_I32(1), A_I32(2), A_I32(3), A_I32(4), A_I32(5), A_U32(6), A_U32(7), wptr(A_U32(8))))
 GL_REG(glCompressedTexImage2D, 8, 0, glCompressedTexImage2D(A_U32(0), A_I32(1), A_U32(2), A_I32(3), A_I32(4), A_I32(5), A_I32(6), wptr(A_U32(7))))
 GL_REG(glCopyTexSubImage2D, 8, 0, glCopyTexSubImage2D(A_U32(0), A_I32(1), A_I32(2), A_I32(3), A_I32(4), A_I32(5), A_I32(6), A_I32(7)))
