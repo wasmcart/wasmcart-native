@@ -186,19 +186,48 @@ static uint32_t _gl_alloc_string(wc_host_t* host, const char* s) {
 }
 
 // Build extension string from glGetStringi (Core profile returns empty from glGetString)
-static char _ext_string_buf[8192] = {0};
+// Also inject GLES-equivalent extension names for Core profile features so gl4es can find them.
+static char _ext_string_buf[16384] = {0};
 static const char* _build_extension_string(void) {
     if (_ext_string_buf[0]) return _ext_string_buf;
     GLint num_ext = 0;
     glGetIntegerv(GL_NUM_EXTENSIONS, &num_ext);
     int offset = 0;
-    for (int i = 0; i < num_ext && offset < 8000; i++) {
+    for (int i = 0; i < num_ext && offset < 14000; i++) {
         const char* ext = (const char*)glGetStringi(GL_EXTENSIONS, i);
         if (ext) {
             int len = strlen(ext);
-            if (offset + len + 1 < 8192) {
+            if (offset + len + 1 < 16384) {
                 if (offset > 0) _ext_string_buf[offset++] = ' ';
                 memcpy(_ext_string_buf + offset, ext, len);
+                offset += len;
+            }
+        }
+    }
+    // Inject GLES extension names that gl4es looks for.
+    // On Core 3.3+ these features are core, but gl4es probes by GLES name.
+    static const char* gles_compat_exts[] = {
+        "GL_EXT_blend_minmax", "GL_EXT_draw_buffers",
+        "GL_OES_mapbuffer", "GL_OES_element_index_uint",
+        "GL_OES_packed_depth_stencil", "GL_OES_depth24",
+        "GL_OES_rgb8_rgba8", "GL_EXT_multi_draw_arrays",
+        "GL_EXT_texture_format_BGRA8888", "GL_OES_depth_texture",
+        "GL_OES_texture_stencil8", "GL_EXT_texture_rg",
+        "GL_OES_texture_float", "GL_OES_texture_half_float",
+        "GL_EXT_color_buffer_float", "GL_EXT_color_buffer_half_float",
+        "GL_EXT_frag_depth", "GL_OES_standard_derivatives",
+        "GL_OES_get_program_binary", "GL_OES_vertex_array_object",
+        "GL_EXT_texture_filter_anisotropic", "GL_OES_texture_npot",
+        "GL_EXT_draw_buffers_indexed",
+        NULL
+    };
+    for (int i = 0; gles_compat_exts[i]; i++) {
+        // Only add if not already present
+        if (!strstr(_ext_string_buf, gles_compat_exts[i])) {
+            int len = strlen(gles_compat_exts[i]);
+            if (offset + len + 1 < 16384) {
+                _ext_string_buf[offset++] = ' ';
+                memcpy(_ext_string_buf + offset, gles_compat_exts[i], len);
                 offset += len;
             }
         }
