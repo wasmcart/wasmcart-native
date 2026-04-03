@@ -329,7 +329,6 @@ GL_REG(glStencilOp, 3, 0, glStencilOp(A_U32(0), A_U32(1), A_U32(2)))
 GL_REG(glStencilOpSeparate, 4, 0, glStencilOpSeparate(A_U32(0), A_U32(1), A_U32(2), A_U32(3)))
 GL_REG(glStencilMask, 1, 0, glStencilMask(A_U32(0)))
 GL_REG(glStencilMaskSeparate, 2, 0, glStencilMaskSeparate(A_U32(0), A_U32(1)))
-})
 
 // ─── Face culling ─────────────────────────────────────────────────────────
 
