@@ -323,35 +323,12 @@ GL_REG(glColorMask, 4, 0, glColorMask(A_U32(0)!=0, A_U32(1)!=0, A_U32(2)!=0, A_U
 GL_REG(glDepthFunc, 1, 0, glDepthFunc(A_U32(0)))
 GL_REG(glDepthMask, 1, 0, glDepthMask(A_U32(0)!=0))
 GL_REG(glDepthRangef, 2, 0, glDepthRangef(A_F32(0), A_F32(1)))
-GL_REG(glStencilFunc, 3, 0, {
-    static int _stlog = 0;
-    if (_stlog < 20) { _stlog++; wc_log("wasmcart: glStencilFunc(0x%x, %d, 0x%x)\n", A_U32(0), A_I32(1), A_U32(2)); }
-    glStencilFunc(A_U32(0), A_I32(1), A_U32(2));
-})
-GL_REG(glStencilFuncSeparate, 4, 0, {
-    static int _stlog = 0;
-    if (_stlog < 20) { _stlog++; wc_log("wasmcart: glStencilFuncSeparate(0x%x, 0x%x, %d, 0x%x)\n", A_U32(0), A_U32(1), A_I32(2), A_U32(3)); }
-    glStencilFuncSeparate(A_U32(0), A_U32(1), A_I32(2), A_U32(3));
-})
-GL_REG(glStencilOp, 3, 0, {
-    static int _stlog = 0;
-    if (_stlog < 20) { _stlog++; wc_log("wasmcart: glStencilOp(0x%x, 0x%x, 0x%x)\n", A_U32(0), A_U32(1), A_U32(2)); }
-    glStencilOp(A_U32(0), A_U32(1), A_U32(2));
-})
-GL_REG(glStencilOpSeparate, 4, 0, {
-    static int _stlog = 0;
-    if (_stlog < 20) { _stlog++; wc_log("wasmcart: glStencilOpSeparate(0x%x, 0x%x, 0x%x, 0x%x)\n", A_U32(0), A_U32(1), A_U32(2), A_U32(3)); }
-    glStencilOpSeparate(A_U32(0), A_U32(1), A_U32(2), A_U32(3));
-})
-GL_REG(glStencilMask, 1, 0, {
-    static int _stlog = 0;
-    if (_stlog < 20) { _stlog++; wc_log("wasmcart: glStencilMask(0x%x)\n", A_U32(0)); }
-    glStencilMask(A_U32(0));
-})
-GL_REG(glStencilMaskSeparate, 2, 0, {
-    static int _stlog = 0;
-    if (_stlog < 20) { _stlog++; wc_log("wasmcart: glStencilMaskSeparate(0x%x, 0x%x)\n", A_U32(0), A_U32(1)); }
-    glStencilMaskSeparate(A_U32(0), A_U32(1));
+GL_REG(glStencilFunc, 3, 0, glStencilFunc(A_U32(0), A_I32(1), A_U32(2)))
+GL_REG(glStencilFuncSeparate, 4, 0, glStencilFuncSeparate(A_U32(0), A_U32(1), A_I32(2), A_U32(3)))
+GL_REG(glStencilOp, 3, 0, glStencilOp(A_U32(0), A_U32(1), A_U32(2)))
+GL_REG(glStencilOpSeparate, 4, 0, glStencilOpSeparate(A_U32(0), A_U32(1), A_U32(2), A_U32(3)))
+GL_REG(glStencilMask, 1, 0, glStencilMask(A_U32(0)))
+GL_REG(glStencilMaskSeparate, 2, 0, glStencilMaskSeparate(A_U32(0), A_U32(1))
 })
 
 // ─── Face culling ─────────────────────────────────────────────────────────
