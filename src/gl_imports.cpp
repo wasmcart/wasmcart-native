@@ -199,17 +199,27 @@ static uint32_t _gl_alloc_string(wc_host_t* host, const char* s) {
 static char _ext_string_buf[16384] = {0};
 static const char* _build_extension_string(void) {
     if (_ext_string_buf[0]) return _ext_string_buf;
-    GLint num_ext = 0;
-    glGetIntegerv(GL_NUM_EXTENSIONS, &num_ext);
+    // Start with driver's glGetString result if non-empty
+    const char* base = (const char*)glGetString(GL_EXTENSIONS);
     int offset = 0;
-    for (int i = 0; i < num_ext && offset < 14000; i++) {
-        const char* ext = (const char*)glGetStringi(GL_EXTENSIONS, i);
-        if (ext) {
-            int len = strlen(ext);
-            if (offset + len + 1 < 16384) {
-                if (offset > 0) _ext_string_buf[offset++] = ' ';
-                memcpy(_ext_string_buf + offset, ext, len);
-                offset += len;
+    if (base && base[0]) {
+        int len = strlen(base);
+        if (len > 14000) len = 14000;
+        memcpy(_ext_string_buf, base, len);
+        offset = len;
+    } else {
+        // Core profile: build from glGetStringi
+        GLint num_ext = 0;
+        glGetIntegerv(GL_NUM_EXTENSIONS, &num_ext);
+        for (int i = 0; i < num_ext && offset < 14000; i++) {
+            const char* ext = (const char*)glGetStringi(GL_EXTENSIONS, i);
+            if (ext) {
+                int len = strlen(ext);
+                if (offset + len + 1 < 16384) {
+                    if (offset > 0) _ext_string_buf[offset++] = ' ';
+                    memcpy(_ext_string_buf + offset, ext, len);
+                    offset += len;
+                }
             }
         }
     }
@@ -250,8 +260,9 @@ GL_REG(glGetString, 1, 1, {
     const char* s = (const char*)glGetString(name);
     // wasmcart ABI = WebGL2 = ES 3.0. Always report ES 3.0 regardless of actual context.
     if (name == 0x1F02) s = "OpenGL ES 3.0 wasmcart";
-    // Core profile returns empty for GL_EXTENSIONS — build from glGetStringi
-    if (name == 0x1F03 && (!s || s[0] == '\0')) s = _build_extension_string();
+    // Always build comprehensive extension string — Core profile may return
+    // empty or ARB-only names. GLES compat names are always injected.
+    if (name == 0x1F03) s = _build_extension_string();
     if (!s) { R_I32(0); } else {
         int idx = (name == 0x1F00) ? 0 : (name == 0x1F01) ? 1 : (name == 0x1F02) ? 2 :
                   (name == 0x1F03) ? 3 : (name == 0x8B8C) ? 4 : 5;
