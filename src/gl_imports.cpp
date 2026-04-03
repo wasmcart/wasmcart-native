@@ -393,15 +393,7 @@ GL_REG(glTexStorage3D, 6, 0, glTexStorage3D(A_U32(0), A_I32(1), A_U32(2), A_I32(
 
 // ─── Shaders ──────────────────────────────────────────────────────────────
 
-// Track shader types for shader patching
-#define MAX_TRACKED_SHADERS 256
-static GLenum _shader_types[MAX_TRACKED_SHADERS] = {0};
-GL_REG(glCreateShader, 1, 1, {
-    GLenum type = A_U32(0);
-    GLuint id = glCreateShader(type);
-    if (id < MAX_TRACKED_SHADERS) _shader_types[id] = type;
-    R_I32(id);
-})
+GL_REG(glCreateShader, 1, 1, R_I32(glCreateShader(A_U32(0))))
 GL_REG(glDeleteShader, 1, 0, glDeleteShader(A_U32(0)))
 GL_REG(glCompileShader, 1, 0, {
     GLuint shader = A_U32(0);
@@ -416,93 +408,14 @@ GL_REG(glCompileShader, 1, 0, {
 })
 GL_REG(glIsShader, 1, 1, R_I32(glIsShader(A_U32(0))))
 
-// Patch GLSL 1.x shaders to GLSL 300 es (same as webgl_imports.js _patchShaderV100toV300)
-static void _replace_word(char* buf, int* len, const char* old_word, const char* new_word) {
-    int old_len = strlen(old_word);
-    int new_len = strlen(new_word);
-    char* p = buf;
-    while ((p = strstr(p, old_word)) != NULL) {
-        // Check word boundary (not part of a larger identifier)
-        if (p > buf && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) { p += old_len; continue; }
-        if (isalnum((unsigned char)p[old_len]) || p[old_len] == '_') { p += old_len; continue; }
-        int tail = *len - (int)(p - buf) - old_len;
-        if (new_len != old_len) memmove(p + new_len, p + old_len, tail + 1);
-        memcpy(p, new_word, new_len);
-        *len += (new_len - old_len);
-        p += new_len;
-    }
-}
+// Shader source is passed through unmodified. wasmcart ABI requires ES 3.0
+// compatible shaders (#version 100 or #version 300 es). Carts using gl4es
+// must configure it for GLES output — the host does not translate shaders.
 
-static void _patch_shader_v1_to_v300es(char* buf, int* len, GLenum shader_type) {
-    // Replace #version line
-    char* ver = strstr(buf, "#version 1");
-    if (!ver) return;
-    // Find end of version line
-    char* eol = strchr(ver, '\n');
-    if (!eol) eol = ver + strlen(ver);
-    int ver_line_len = (int)(eol - ver);
-    const char* new_ver = "#version 300 es";
-    int new_ver_len = 15;
-    int tail = *len - (int)(eol - buf);
-    memmove(ver + new_ver_len, eol, tail + 1);
-    memcpy(ver, new_ver, new_ver_len);
-    *len += (new_ver_len - ver_line_len);
-
-    if (shader_type == GL_FRAGMENT_SHADER) {
-        // 300 es fragment shaders require precision qualifier
-        char* after_ver = strstr(buf, "#version 300 es");
-        if (after_ver) {
-            after_ver = strchr(after_ver, '\n');
-            if (after_ver && !strstr(buf, "precision ")) {
-                after_ver++;
-                const char* prec = "precision mediump float;\n";
-                int prec_len = 25;
-                int tail_len = *len - (int)(after_ver - buf);
-                memmove(after_ver + prec_len, after_ver, tail_len + 1);
-                memcpy(after_ver, prec, prec_len);
-                *len += prec_len;
-            }
-        }
-        _replace_word(buf, len, "varying", "in");
-        if (strstr(buf, "gl_FragColor")) {
-            _replace_word(buf, len, "gl_FragColor", "FragColor");
-            // Insert "out vec4 FragColor;" after version line
-            char* insert = strstr(buf, "#version 300 es");
-            if (insert) {
-                insert = strchr(insert, '\n');
-                if (insert) {
-                    insert++;
-                    const char* decl = "out vec4 FragColor;\n";
-                    int decl_len = 20;
-                    int tail2 = *len - (int)(insert - buf);
-                    memmove(insert + decl_len, insert, tail2 + 1);
-                    memcpy(insert, decl, decl_len);
-                    *len += decl_len;
-                }
-            }
-        }
-        if (strstr(buf, "gl_FragData")) {
-            _replace_word(buf, len, "gl_FragData[0]", "FragColor");
-        }
-    } else {
-        _replace_word(buf, len, "attribute", "in");
-        _replace_word(buf, len, "varying", "out");
-    }
-    _replace_word(buf, len, "texture2D", "texture");
-    _replace_word(buf, len, "texture2DProj", "textureProj");
-    _replace_word(buf, len, "textureCube", "texture");
-
-    // Strip #extension lines that are core in ES 3.00
-    char* ext;
-    while ((ext = strstr(buf, "#extension")) != NULL) {
-        char* ext_eol = strchr(ext, '\n');
-        if (!ext_eol) ext_eol = ext + strlen(ext);
-        else ext_eol++;
-        int remove_len = (int)(ext_eol - ext);
-        memmove(ext, ext_eol, *len - (int)(ext_eol - buf) + 1);
-        *len -= remove_len;
-    }
-}
+// REMOVED: _patch_shader_v1_to_v300es — shader patching was interfering with
+// gl4es's GLSL version detection. gl4es tests if #version 120 compiles; our
+// patcher made it succeed, causing gl4es to generate desktop GL shaders.
+// Without the patcher, gl4es correctly detects GLES-only and outputs #version 100.
 
 GL_REG(glShaderSource, 4, 0, {
     wc_refresh_memory(_host);
@@ -515,21 +428,9 @@ GL_REG(glShaderSource, 4, 0, {
     const char* sources[16];
     int lens[16];
     int n = count > 16 ? 16 : count;
-    static char patched_bufs[16][16384];
-    GLenum stype = (shader < MAX_TRACKED_SHADERS) ? _shader_types[shader] : 0;
     for (int i = 0; i < n; i++) {
-        const char* src = (const char*)wptr(wasm_ptrs[i]);
-        int src_len = wasm_lens ? wasm_lens[i] : (int)strlen(src);
-        if (src_len > 0 && src_len < 16000 && strstr(src, "#version 1")) {
-            memcpy(patched_bufs[i], src, src_len);
-            patched_bufs[i][src_len] = '\0';
-            _patch_shader_v1_to_v300es(patched_bufs[i], &src_len, stype);
-            sources[i] = patched_bufs[i];
-            lens[i] = src_len;
-        } else {
-            sources[i] = src;
-            lens[i] = wasm_lens ? wasm_lens[i] : -1;
-        }
+        sources[i] = (const char*)wptr(wasm_ptrs[i]);
+        lens[i] = wasm_lens ? wasm_lens[i] : -1;
     }
     glShaderSource(shader, n, sources, wasm_lens ? lens : NULL);
 })
