@@ -238,6 +238,7 @@ static const char* _build_extension_string(void) {
         "GL_OES_get_program_binary", "GL_OES_vertex_array_object",
         "GL_EXT_texture_filter_anisotropic", "GL_OES_texture_npot",
         "GL_EXT_draw_buffers_indexed",
+        "GL_OES_vertex_array_object",
         NULL
     };
     for (int i = 0; gles_compat_exts[i]; i++) {
@@ -1051,6 +1052,9 @@ extern "C" void wc_gl_rebind_redirect(void) {
     if (!_redirect_fbo) return;
     glBindFramebuffer(GL_FRAMEBUFFER, _redirect_fbo);
     glViewport(0, 0, _redirect_w, _redirect_h);
+    // Ensure cart VAO is bound — Core 3.3 requires non-zero VAO for draw calls.
+    // Carts that don't use VAOs (gl4es) would otherwise get GL_INVALID_OPERATION.
+    if (_cart_vao) glBindVertexArray(_cart_vao);
     _last_draw_fbo = _redirect_fbo;
     _cart_blitted_to_redirect = 0;
     _draw_call_count = 0;
