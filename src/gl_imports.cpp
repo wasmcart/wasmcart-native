@@ -381,14 +381,20 @@ GL_REG(glShaderSource, 4, 0, {
             (strncmp(src, "#version 120", 12) == 0 ||
              strncmp(src, "#version 110", 12) == 0)) {
             // gl4es generates #version 120 with layout() + precision qualifiers.
-            // Replace version line with "#version 300 es" for GLES3 compatibility.
-            const char* new_ver = "#version 300 es";
-            int new_ver_len = 15;
-            // Find end of "#version 1x0" (12 chars)
+            // Replace version tag with "#version 300 es\n" for GLES3 compatibility.
+            // gl4es may not have newline after #version 120 (e.g. #version 120#extension)
+            const char* new_ver = "#version 300 es\n";
+            int new_ver_len = 16;
+            // Skip past "#version 1x0" and any trailing whitespace/newline
+            int skip = 12;
+            while (skip < src_len && (src[skip] == ' ' || src[skip] == '\t')) skip++;
+            if (skip < src_len && src[skip] == '\n') skip++;
+            else if (skip < src_len && src[skip] == '\r') { skip++; if (skip < src_len && src[skip] == '\n') skip++; }
+            int rest_len = src_len - skip;
             memcpy(patched_bufs[i], new_ver, new_ver_len);
-            memcpy(patched_bufs[i] + new_ver_len, src + 12, src_len - 12);
-            patched_bufs[i][new_ver_len + src_len - 12] = '\0';
-            src_len = new_ver_len + src_len - 12;
+            memcpy(patched_bufs[i] + new_ver_len, src + skip, rest_len);
+            patched_bufs[i][new_ver_len + rest_len] = '\0';
+            src_len = new_ver_len + rest_len;
             sources[i] = patched_bufs[i];
             lens[i] = src_len;
         } else {
