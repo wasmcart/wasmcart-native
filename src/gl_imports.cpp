@@ -377,13 +377,18 @@ GL_REG(glShaderSource, 4, 0, {
     for (int i = 0; i < n; i++) {
         const char* src = (const char*)wptr(wasm_ptrs[i]);
         int src_len = wasm_lens ? wasm_lens[i] : (int)strlen(src);
-        if (src_len > 0 && src_len < 8192 &&
+        if (src_len > 0 && src_len < 8100 &&
             (strncmp(src, "#version 120", 12) == 0 ||
              strncmp(src, "#version 110", 12) == 0)) {
-            memcpy(patched_bufs[i], src, src_len);
-            patched_bufs[i][src_len] = '\0';
-            // Replace "#version 1x0" with "#version 100"
-            memcpy(patched_bufs[i], "#version 100", 12);
+            // gl4es generates #version 120 with layout() + precision qualifiers.
+            // Replace version line with "#version 300 es" for GLES3 compatibility.
+            const char* new_ver = "#version 300 es";
+            int new_ver_len = 15;
+            // Find end of "#version 1x0" (12 chars)
+            memcpy(patched_bufs[i], new_ver, new_ver_len);
+            memcpy(patched_bufs[i] + new_ver_len, src + 12, src_len - 12);
+            patched_bufs[i][new_ver_len + src_len - 12] = '\0';
+            src_len = new_ver_len + src_len - 12;
             sources[i] = patched_bufs[i];
             lens[i] = src_len;
         } else {
