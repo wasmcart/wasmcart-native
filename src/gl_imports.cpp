@@ -449,6 +449,20 @@ static void _patch_shader_v1_to_v300es(char* buf, int* len, GLenum shader_type) 
     *len += (new_ver_len - ver_line_len);
 
     if (shader_type == GL_FRAGMENT_SHADER) {
+        // 300 es fragment shaders require precision qualifier
+        char* after_ver = strstr(buf, "#version 300 es");
+        if (after_ver) {
+            after_ver = strchr(after_ver, '\n');
+            if (after_ver && !strstr(buf, "precision ")) {
+                after_ver++;
+                const char* prec = "precision mediump float;\n";
+                int prec_len = 25;
+                int tail_len = *len - (int)(after_ver - buf);
+                memmove(after_ver + prec_len, after_ver, tail_len + 1);
+                memcpy(after_ver, prec, prec_len);
+                *len += prec_len;
+            }
+        }
         _replace_word(buf, len, "varying", "in");
         if (strstr(buf, "gl_FragColor")) {
             _replace_word(buf, len, "gl_FragColor", "FragColor");
