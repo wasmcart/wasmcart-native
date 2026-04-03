@@ -403,14 +403,10 @@ static GLenum _fixFormat(GLenum fmt) {
     }
 }
 GL_REG(glTexImage2D, 9, 0, {
-    GLenum target = A_U32(0);
-    GLint level = A_I32(1);
-    GLenum ifmt = _fixInternalFormat(A_I32(2), A_U32(7));
-    GLsizei w = A_I32(3), h = A_I32(4);
-    GLint border = A_I32(5);
-    GLenum fmt = _fixFormat(A_U32(6));
     GLenum type = A_U32(7);
-    glTexImage2D(target, level, ifmt, w, h, border, fmt, type, wptr(A_U32(8)));
+    GLenum ifmt = _fixInternalFormat(A_I32(2), type);
+    GLenum fmt = _fixFormat(A_U32(6));
+    glTexImage2D(A_U32(0), A_I32(1), ifmt, A_I32(3), A_I32(4), A_I32(5), fmt, type, wptr(A_U32(8)));
 })
 GL_REG(glTexSubImage2D, 9, 0, glTexSubImage2D(A_U32(0), A_I32(1), A_I32(2), A_I32(3), A_I32(4), A_I32(5), A_U32(6), A_U32(7), wptr(A_U32(8))))
 GL_REG(glCompressedTexImage2D, 8, 0, glCompressedTexImage2D(A_U32(0), A_I32(1), A_U32(2), A_I32(3), A_I32(4), A_I32(5), A_I32(6), wptr(A_U32(7))))
