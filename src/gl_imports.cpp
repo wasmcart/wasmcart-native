@@ -150,7 +150,16 @@ GL_REG(glHint, 2, 0, glHint(A_U32(0), A_U32(1)))
 GL_REG(glPixelStorei, 2, 0, glPixelStorei(A_U32(0), A_I32(1)))
 GL_REG(glIsEnabled, 1, 1, R_I32(glIsEnabled(A_U32(0))))
 
-GL_REG(glGetIntegerv, 2, 0, glGetIntegerv(A_U32(0), (GLint*)wptr(A_U32(1))))
+GL_REG(glGetIntegerv, 2, 0, {
+    GLenum pname = A_U32(0);
+    GLint* out = (GLint*)wptr(A_U32(1));
+    glGetIntegerv(pname, out);
+    // Log queries for max color attachments / draw buffers (gl4es compat debug)
+    if (pname == 0x8CDF || pname == 0x8824) { // GL_MAX_COLOR_ATTACHMENTS / GL_MAX_DRAW_BUFFERS
+        static int _glog = 0;
+        if (_glog < 5) { _glog++; wc_log("wasmcart: glGetIntegerv(0x%04x) = %d\n", pname, *out); }
+    }
+})
 GL_REG(glGetFloatv, 2, 0, glGetFloatv(A_U32(0), (GLfloat*)wptr(A_U32(1))))
 GL_REG(glGetBooleanv, 2, 0, glGetBooleanv(A_U32(0), (GLboolean*)wptr(A_U32(1))))
 GL_REG(glGetInternalformativ, 5, 0,
