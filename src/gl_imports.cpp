@@ -393,7 +393,15 @@ GL_REG(glTexStorage3D, 6, 0, glTexStorage3D(A_U32(0), A_I32(1), A_U32(2), A_I32(
 
 // ─── Shaders ──────────────────────────────────────────────────────────────
 
-GL_REG(glCreateShader, 1, 1, R_I32(glCreateShader(A_U32(0))))
+// Track shader types for shader patching
+#define MAX_TRACKED_SHADERS 256
+static GLenum _shader_types[MAX_TRACKED_SHADERS] = {0};
+GL_REG(glCreateShader, 1, 1, {
+    GLenum type = A_U32(0);
+    GLuint id = glCreateShader(type);
+    if (id < MAX_TRACKED_SHADERS) _shader_types[id] = type;
+    R_I32(id);
+})
 GL_REG(glDeleteShader, 1, 0, glDeleteShader(A_U32(0)))
 GL_REG(glCompileShader, 1, 0, {
     GLuint shader = A_U32(0);
@@ -408,8 +416,81 @@ GL_REG(glCompileShader, 1, 0, {
 })
 GL_REG(glIsShader, 1, 1, R_I32(glIsShader(A_U32(0))))
 
+// Patch GLSL 1.x shaders to GLSL 300 es (same as webgl_imports.js _patchShaderV100toV300)
+static void _replace_word(char* buf, int* len, const char* old_word, const char* new_word) {
+    int old_len = strlen(old_word);
+    int new_len = strlen(new_word);
+    char* p = buf;
+    while ((p = strstr(p, old_word)) != NULL) {
+        // Check word boundary (not part of a larger identifier)
+        if (p > buf && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) { p += old_len; continue; }
+        if (isalnum((unsigned char)p[old_len]) || p[old_len] == '_') { p += old_len; continue; }
+        int tail = *len - (int)(p - buf) - old_len;
+        if (new_len != old_len) memmove(p + new_len, p + old_len, tail + 1);
+        memcpy(p, new_word, new_len);
+        *len += (new_len - old_len);
+        p += new_len;
+    }
+}
+
+static void _patch_shader_v1_to_v300es(char* buf, int* len, GLenum shader_type) {
+    // Replace #version line
+    char* ver = strstr(buf, "#version 1");
+    if (!ver) return;
+    // Find end of version line
+    char* eol = strchr(ver, '\n');
+    if (!eol) eol = ver + strlen(ver);
+    int ver_line_len = (int)(eol - ver);
+    const char* new_ver = "#version 300 es";
+    int new_ver_len = 15;
+    int tail = *len - (int)(eol - buf);
+    memmove(ver + new_ver_len, eol, tail + 1);
+    memcpy(ver, new_ver, new_ver_len);
+    *len += (new_ver_len - ver_line_len);
+
+    if (shader_type == GL_FRAGMENT_SHADER) {
+        _replace_word(buf, len, "varying", "in");
+        if (strstr(buf, "gl_FragColor")) {
+            _replace_word(buf, len, "gl_FragColor", "FragColor");
+            // Insert "out vec4 FragColor;" after version line
+            char* insert = strstr(buf, "#version 300 es");
+            if (insert) {
+                insert = strchr(insert, '\n');
+                if (insert) {
+                    insert++;
+                    const char* decl = "out vec4 FragColor;\n";
+                    int decl_len = 20;
+                    int tail2 = *len - (int)(insert - buf);
+                    memmove(insert + decl_len, insert, tail2 + 1);
+                    memcpy(insert, decl, decl_len);
+                    *len += decl_len;
+                }
+            }
+        }
+        if (strstr(buf, "gl_FragData")) {
+            _replace_word(buf, len, "gl_FragData[0]", "FragColor");
+        }
+    } else {
+        _replace_word(buf, len, "attribute", "in");
+        _replace_word(buf, len, "varying", "out");
+    }
+    _replace_word(buf, len, "texture2D", "texture");
+    _replace_word(buf, len, "texture2DProj", "textureProj");
+    _replace_word(buf, len, "textureCube", "texture");
+
+    // Strip #extension lines that are core in ES 3.00
+    char* ext;
+    while ((ext = strstr(buf, "#extension")) != NULL) {
+        char* ext_eol = strchr(ext, '\n');
+        if (!ext_eol) ext_eol = ext + strlen(ext);
+        else ext_eol++;
+        int remove_len = (int)(ext_eol - ext);
+        memmove(ext, ext_eol, *len - (int)(ext_eol - buf) + 1);
+        *len -= remove_len;
+    }
+}
+
 GL_REG(glShaderSource, 4, 0, {
-    // Refresh memory — cart may have grown WASM memory since last refresh
     wc_refresh_memory(_host);
     uint32_t shader = A_U32(0);
     int32_t count = A_I32(1);
@@ -420,30 +501,15 @@ GL_REG(glShaderSource, 4, 0, {
     const char* sources[16];
     int lens[16];
     int n = count > 16 ? 16 : count;
-    // Patch desktop GL version strings to GLES equivalents.
-    // gl4es generates #version 120 which GLES drivers reject.
-    static char patched_bufs[16][8192];
+    static char patched_bufs[16][16384];
+    GLenum stype = (shader < MAX_TRACKED_SHADERS) ? _shader_types[shader] : 0;
     for (int i = 0; i < n; i++) {
         const char* src = (const char*)wptr(wasm_ptrs[i]);
         int src_len = wasm_lens ? wasm_lens[i] : (int)strlen(src);
-        if (src_len > 0 && src_len < 8100 &&
-            (strncmp(src, "#version 120", 12) == 0 ||
-             strncmp(src, "#version 110", 12) == 0)) {
-            // gl4es generates #version 120 with layout() + precision qualifiers.
-            // Replace version tag with "#version 300 es\n" for GLES3 compatibility.
-            // gl4es may not have newline after #version 120 (e.g. #version 120#extension)
-            const char* new_ver = "#version 300 es\n";
-            int new_ver_len = 16;
-            // Skip past "#version 1x0" and any trailing whitespace/newline
-            int skip = 12;
-            while (skip < src_len && (src[skip] == ' ' || src[skip] == '\t')) skip++;
-            if (skip < src_len && src[skip] == '\n') skip++;
-            else if (skip < src_len && src[skip] == '\r') { skip++; if (skip < src_len && src[skip] == '\n') skip++; }
-            int rest_len = src_len - skip;
-            memcpy(patched_bufs[i], new_ver, new_ver_len);
-            memcpy(patched_bufs[i] + new_ver_len, src + skip, rest_len);
-            patched_bufs[i][new_ver_len + rest_len] = '\0';
-            src_len = new_ver_len + rest_len;
+        if (src_len > 0 && src_len < 16000 && strstr(src, "#version 1")) {
+            memcpy(patched_bufs[i], src, src_len);
+            patched_bufs[i][src_len] = '\0';
+            _patch_shader_v1_to_v300es(patched_bufs[i], &src_len, stype);
             sources[i] = patched_bufs[i];
             lens[i] = src_len;
         } else {
