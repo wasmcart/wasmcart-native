@@ -154,10 +154,10 @@ GL_REG(glGetIntegerv, 2, 0, {
     GLenum pname = A_U32(0);
     GLint* out = (GLint*)wptr(A_U32(1));
     glGetIntegerv(pname, out);
-    // Log queries for max color attachments / draw buffers (gl4es compat debug)
-    if (pname == 0x8CDF || pname == 0x8824) { // GL_MAX_COLOR_ATTACHMENTS / GL_MAX_DRAW_BUFFERS
-        static int _glog = 0;
-        if (_glog < 5) { _glog++; wc_log("wasmcart: glGetIntegerv(0x%04x) = %d\n", pname, *out); }
+    // Ensure correct values for draw buffer caps — Core 3.3 returns correct values
+    // but gl4es may query these before the context is fully configured
+    if ((pname == 0x8CDF || pname == 0x8824) && *out < 4) {
+        *out = 8; // GL_MAX_COLOR_ATTACHMENTS / GL_MAX_DRAW_BUFFERS
     }
 })
 GL_REG(glGetFloatv, 2, 0, glGetFloatv(A_U32(0), (GLfloat*)wptr(A_U32(1))))
@@ -262,7 +262,16 @@ GL_REG(glGetString, 1, 1, {
     if (name == 0x1F02) s = "OpenGL ES 3.0 wasmcart";
     // Always build comprehensive extension string — Core profile may return
     // empty or ARB-only names. GLES compat names are always injected.
-    if (name == 0x1F03) s = _build_extension_string();
+    if (name == 0x1F03) {
+        s = _build_extension_string();
+        static int _ext_logged = 0;
+        if (!_ext_logged) {
+            _ext_logged = 1;
+            wc_log("wasmcart: GL_EXTENSIONS has draw_buffers: %s\n",
+                strstr(s, "GL_EXT_draw_buffers") ? "YES" : "NO");
+            wc_log("wasmcart: GL_EXTENSIONS length: %d\n", (int)strlen(s));
+        }
+    }
     if (!s) { R_I32(0); } else {
         int idx = (name == 0x1F00) ? 0 : (name == 0x1F01) ? 1 : (name == 0x1F02) ? 2 :
                   (name == 0x1F03) ? 3 : (name == 0x8B8C) ? 4 : 5;
