@@ -13,6 +13,12 @@ extern "C" {
 #include <string.h>
 #include <stdio.h>
 }
+// AFTER the GLES headers: redirect every glXxx() in this file to a pointer loaded
+// from the host's get-proc-address (RetroArch's for the libretro core, EGL's for
+// the native host). This file then links NO GL library — no ANGLE, single
+// self-contained core. (Placed outside the extern "C" header block so the
+// #defines don't rewrite the header declarations.)
+#include "gl_procs.h"
 #include "wc_log.h"
 
 // V8 context accessor — defined in cart_host.cpp
@@ -1085,6 +1091,16 @@ extern "C" void wc_gl_set_redirect_fbo(uint32_t fbo, uint32_t width, uint32_t he
 }
 
 extern "C" void wc_gl_setup_redirect(uint32_t width, uint32_t height) {
+    // Resolve all GL entry points from the host's loader before any GL call.
+    // The host (libretro core or native) sets host->gl_loader; for the core that
+    // is RetroArch's get_proc_address. Runs on context_reset, before the FBO ops.
+    static int s_gl_loaded = 0;
+    if (!s_gl_loaded && _host && _host->gl_loader) {
+        wc_gl_procs_load((void*)_host->gl_loader);
+        s_gl_loaded = 1;
+        if (!p_glGenFramebuffers)
+            wc_log("wasmcart: WARNING host gl_loader returned no glGenFramebuffers\n");
+    }
     _ensure_redirect_fbo(width, height);
 }
 
