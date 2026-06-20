@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  LIBNODE_VERSION: v24.14.1
+  LIBNODE_VERSION: v26.3.0-jsg9
 
 jobs:
   build-linux-x86_64:
@@ -167,7 +167,8 @@ jobs:
           path: wasmcart-native-macos-aarch64.tar.gz
 
   build-windows-x86_64:
-    runs-on: windows-latest
+    # windows-2025: libnode v26 .lib needs a newer MSVC STL than windows-2022.
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@v6
       - uses: ilammy/msvc-dev-cmd@v1

@@ -53,7 +53,7 @@ V8's Liftoff baseline compiler starts WASM instantly — no compilation delay, e
 ```bash
 # Download pre-built libnode
 mkdir -p deps/libnode
-curl -sL https://github.com/wasmcart/build-libnode/releases/download/v24.14.1/libnode-linux-x86_64.tar.gz \
+curl -sL https://github.com/wasmcart/build-libnode/releases/download/v26.3.0-jsg9/libnode-linux-x86_64.tar.gz \
   | tar xz -C deps/libnode
 
 # Build
