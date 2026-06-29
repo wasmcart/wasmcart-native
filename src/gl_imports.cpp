@@ -1243,6 +1243,11 @@ extern "C" void wc_gl_build_v8_imports(v8::Isolate* isolate, v8::Local<v8::Conte
         env_obj->Set(context, name, fn).Check();
     }
 
-    wc_log( "wasmcart: GL imports registered (%d functions, %s)\n",
-        idx, (const char*)glGetString(GL_RENDERER));
+    // NOTE: GL procs are loaded from the frontend's get_proc_address in
+    // context_reset, which runs AFTER this (wc_gl_build_v8_imports is called from
+    // wc_host_load_file, during retro_load_game). So p_glGetString is still NULL
+    // here — calling glGetString(GL_RENDERER) unconditionally segfaults (jump to
+    // 0x0). Guard it: only report the renderer once the procs are actually loaded.
+    const char* renderer = p_glGetString ? (const char*)glGetString(GL_RENDERER) : "(GL not ready)";
+    wc_log( "wasmcart: GL imports registered (%d functions, %s)\n", idx, renderer);
 }
