@@ -9,3 +9,11 @@ deps/libnode/
 *.dll
 *.exe
 .DS_Store
+
+# Patch/merge debris
+*.orig
+*.rej
+
+# Host runtime logs written next to a cart when it runs
+wasmcart.log
+**/wasmcart.log

@@ -1,6 +1,9 @@
 # wasmcart-native
 
-Standalone wasmcart player. Runs `.wasc` game carts with V8 for instant WASM startup, SDL2 for display/input/audio, and EGL/GLES3 for GPU carts.
+Standalone [wasmcart](https://github.com/wasmcart/wasmcart) player. Runs `.wasc` game
+carts with [V8](https://v8.dev) for instant WASM startup (via
+[libnode](https://github.com/wasmcart/build-libnode)), [SDL2](https://www.libsdl.org)
+for display/input/audio, and EGL/GLES3 for GPU carts.
 
 One binary. No runtime dependencies beyond system GL. Drop it on any Linux, macOS, or Windows machine and play.
 
@@ -24,8 +27,8 @@ Every `.wasc` cart that runs in the browser or Node.js also runs here. Same WASM
 | Cart type | Rendering | Examples |
 |-----------|-----------|----------|
 | 2D framebuffer | SDL2 accelerated renderer, letterboxed | Snake, Doom, ccleste, pygame carts |
-| GL (GLES3) | EGL + direct GL, FBO redirect, letterboxed | OpenArena, GZDoom, Neverball, ETR |
-| Godot 4.x | GL + GLES3 Compatibility renderer | Warlords, RoboBlast, Kenney Platformer |
+| GL (GLES3) | EGL + direct GL, FBO redirect, letterboxed | OpenArena, [GZDoom](https://zdoom.org), [Neverball](https://neverball.org), ETR |
+| [Godot](https://godotengine.org) 4.x | GL + GLES3 Compatibility renderer | Warlords, RoboBlast, Kenney Platformer |
 
 ## Performance
 
@@ -34,9 +37,9 @@ V8's Liftoff baseline compiler starts WASM instantly — no compilation delay, e
 | Cart | FPS (uncapped, 1080p) |
 |------|---------------|
 | Snake (320x240 2D) | 4,900 |
-| Three.js (WebGL2) | 2,470 |
-| OpenArena (ioquake3 GL) | 830 |
-| Adventure AI (Skia Ganesh GPU) | 716 |
+| [Three.js](https://threejs.org) (WebGL2) | 2,470 |
+| OpenArena ([ioquake3](https://github.com/ioquake/ioq3) GL) | 830 |
+| Adventure AI ([Skia](https://skia.org) Ganesh GPU) | 716 |
 | Warlords (Godot GL) | 430 |
 
 ## Build
@@ -45,7 +48,7 @@ V8's Liftoff baseline compiler starts WASM instantly — no compilation delay, e
 
 - CMake 3.16+
 - C/C++ compiler (gcc/clang)
-- SDL2 dev headers (`sudo apt install libsdl2-dev`)
+- [SDL2](https://www.libsdl.org) dev headers (`sudo apt install libsdl2-dev`)
 - EGL + GLES dev headers (`sudo apt install libegl-dev libgles-dev`)
 
 ### Build from source
@@ -67,7 +70,16 @@ make -j$(nproc)
 
 ### Pre-built binaries
 
-Download from [Releases](https://github.com/wasmcart/wasmcart-native/releases).
+Download from [Releases](https://github.com/wasmcart/wasmcart-native/releases) —
+Linux (x86_64/aarch64), macOS (x86_64/aarch64) and Windows x86_64.
+
+The ZIP reader is [miniz](https://github.com/richgel999/miniz) and manifest parsing
+uses [cJSON](https://github.com/DaveGamble/cJSON), both vendored under `deps/`.
+
+This same host core is shared with
+[wasmcart-libretro](https://github.com/wasmcart/wasmcart-libretro) via git submodule,
+so the GL bridge and asset loader stay in lockstep between the standalone player and
+the RetroArch core.
 
 ## Architecture
 
@@ -123,12 +135,14 @@ Determined by the cart's `gpu_api` field:
 
 ### Performance: Native vs Node.js Host
 
-The Node.js host (retroemu/cli.js + native-gles) currently beats the native host on some GL carts (~860 vs ~716 FPS for Skia Ganesh). Both use V8 for WASM and the same GPU for GL. The gap is in the GL call overhead:
+The Node.js host ([retroemu](https://github.com/monteslu/retroemu) +
+[native-gles](https://github.com/monteslu/native-gles)) currently beats the native
+host on some GL carts (~860 vs ~716 FPS for Skia Ganesh). Both use V8 for WASM and the same GPU for GL. The gap is in the GL call overhead:
 
 - **Node.js host**: GL calls go through N-API (native-gles addon) — one function pointer call per GL function, minimal marshaling.
 - **Native host**: GL calls go through V8 FunctionCallbacks — each call enters V8's callback machinery, extracts args from `v8::FunctionCallbackInfo`, converts types. This overhead multiplies across ~73 GL calls per frame (Ganesh) or ~193 GL calls in complex scenes.
 
-**Potential fix**: Register GL imports as "fast API calls" (`v8::CFunction`) instead of regular FunctionCallbacks. V8's fast API path bypasses the full callback machinery for simple functions with known signatures — could eliminate most of the per-call overhead.
+**Potential fix**: Register GL imports as [fast API calls](https://v8.dev/docs/embed) (`v8::CFunction`) instead of regular FunctionCallbacks. V8's fast API path bypasses the full callback machinery for simple functions with known signatures — could eliminate most of the per-call overhead.
 
 ### Wayland vs X11
 
@@ -136,7 +150,7 @@ SDL2 may choose X11 (via XWayland) on Wayland sessions. The `egl_create_window_s
 
 ### Platform-Specific
 
-- **macOS / Windows**: Require ANGLE for GLES3 (no native GLES). Set `ANGLE_DIR` in cmake.
+- **macOS / Windows**: Require [ANGLE](https://github.com/google/angle) for GLES3 (no native GLES). Set `ANGLE_DIR` in cmake.
 - **macOS**: Link `-framework Security -framework SystemConfiguration` (libnode TLS).
 - **Windows**: MSVC needs `/std:c++20 /Zc:__cplusplus` (CXX only) + static CRT (`/MT`).
 - **Windows**: `clock_gettime` → `QueryPerformanceCounter` (`#ifdef _WIN32`).

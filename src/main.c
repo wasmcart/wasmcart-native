@@ -461,7 +461,7 @@ int main(int argc, char* argv[]) {
         // Time
         double time_ms = (double)(now - start_ticks);
         double delta_ms = (double)(now - last_frame_ticks);
-        if (delta_ms < 1.0) delta_ms = 16.667;  // avoid zero delta
+        if (delta_ms <= 0.0) delta_ms = 0.001;  // avoid zero delta
         last_frame_ticks = now;
         wc_host_set_time(host, time_ms, delta_ms, frame_count);
 
