@@ -43,6 +43,14 @@ target_include_directories(wasmcart PRIVATE
 )
 if(WIN32)
     target_link_libraries(wasmcart PUBLIC ${LIBNODE_DIR}/libnode.lib winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
+elseif(APPLE)
+    # libnode's crypto reads the macOS keychain (ReadMacOSKeychainCertificates,
+    # kSecPolicyAppleSSL), so Security and CoreFoundation are libnode's
+    # dependencies, not SDL's. They were only listed in the SDL2_STATIC branch
+    # below, which does not run when SDL comes from Homebrew -- so every macOS
+    # CI build failed at link with "symbol(s) not found for architecture".
+    target_link_libraries(wasmcart PUBLIC ${LIBNODE_DIR}/libnode.a pthread dl m
+        "-framework Security" "-framework CoreFoundation")
 else()
     target_link_libraries(wasmcart PUBLIC ${LIBNODE_DIR}/libnode.a pthread dl m)
 endif()
