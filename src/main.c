@@ -21,35 +21,9 @@
 
 static SDL_GameController* controllers[MAX_CONTROLLERS] = {0};
 
-// ─── Letterboxed viewport ──────────────────────────────────────────────────
-
-static void update_gl_viewport(int win_w, int win_h, int cart_w, int cart_h) {
-    float win_aspect = (float)win_w / win_h;
-    float cart_aspect = (float)cart_w / cart_h;
-
-    int vp_x, vp_y, vp_w, vp_h;
-    if (win_aspect > cart_aspect) {
-        // Window wider than cart — pillarbox
-        vp_h = win_h;
-        vp_w = (int)(win_h * cart_aspect);
-        vp_x = (win_w - vp_w) / 2;
-        vp_y = 0;
-    } else {
-        // Window taller than cart — letterbox
-        vp_w = win_w;
-        vp_h = (int)(win_w / cart_aspect);
-        vp_x = 0;
-        vp_y = (win_h - vp_h) / 2;
-    }
-
-    glViewport(vp_x, vp_y, vp_w, vp_h);
-    // Clear the letterbox/pillarbox bars to black
-    glScissor(0, 0, win_w, win_h);
-    glEnable(GL_SCISSOR_TEST);
-    glClearColor(0, 0, 0, 1);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glScissor(vp_x, vp_y, vp_w, vp_h);
-}
+// Letterboxing is NOT done here. GL carts are scaled by wc_gl_blit_to_screen
+// (gl_imports.cpp), which computes a centred destination rect from the cart's
+// real blit size; 2D carts are scaled by SDL via SDL_RenderSetLogicalSize.
 
 static void print_usage(const char* argv0) {
     fprintf(stderr, "Usage: %s <cart.wasc|cart.wasm> [options]\n", argv0);
