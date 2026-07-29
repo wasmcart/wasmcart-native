@@ -73,6 +73,24 @@ make -j$(nproc)
 Download from [Releases](https://github.com/wasmcart/wasmcart-native/releases) —
 Linux (x86_64/aarch64), macOS (x86_64/aarch64) and Windows x86_64.
 
+On Linux and macOS, if the binary arrives without its execute bit:
+
+```bash
+chmod +x wasmcart-run
+```
+
+The release `.tar.gz` preserves the mode. What does not is the **ZIP that
+GitHub Actions wraps around build artifacts** — downloading from the *Actions*
+run page (rather than the Releases page) gives you a zip of the tarball, and
+that layer drops the Unix mode. Copying between filesystems can do the same.
+
+Worth knowing because the failure is misleading: the file is a perfectly valid
+ELF, so `Permission denied` reads like a missing dependency or a broken build
+rather than a file mode. `ls -l wasmcart-run` settles it in one command —
+`-rw-rw-r--` means chmod, not a rebuild.
+
+Building from source is unaffected; the linker sets the bit.
+
 The ZIP reader is [miniz](https://github.com/richgel999/miniz) and manifest parsing
 uses [cJSON](https://github.com/DaveGamble/cJSON), both vendored under `deps/`.
 
