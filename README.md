@@ -129,6 +129,15 @@ wasmcart-run (75MB, statically linked)
   from the cart's own state, which is also the on-screen keyboard signal on
   platforms that have one
 
+While a cart is taking text, the keyboard STOPS acting as a virtual gamepad --
+otherwise typing a name also plays the game ("w" walks the player, Q/E fire the
+shoulders, Return presses Start). Real gamepads keep working throughout, so a
+cart can drive a d-pad character picker while a field is open.
+
+The keyboard-as-gamepad fallback is not conditional on whether a controller is
+plugged in. Making it so would mean unplugging a pad mid-game silently changed
+what the keys did.
+
 ## Resolution
 
 The host passes preferred resolution to the cart via `--res`. The cart decides its actual rendering resolution. The host scales the output to fit the window, preserving aspect ratio with letterboxing. Without `--res`, the window matches the cart's native resolution.
@@ -182,6 +191,7 @@ node ../wasmcart/test/wsserver.mjs --port 8796 &   # from the wasmcart repo
 ./net_test 8796         # require, nextTick, net.connect, WebSocket round-trip
 ./rumble_test ../wasmcart/test/fixtures/rumble.wasc
 ./text_test  test/textauto.wasc 5436 5440 5444 5456
+sh test/input_guard_test.sh   # keyboard is not also a gamepad while typing
 ```
 
 `text_test` takes the cart's debug-field offsets as arguments because they move

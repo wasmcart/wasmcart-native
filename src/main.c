@@ -99,6 +99,13 @@ static void poll_pads(wc_pad_t pads[WC_MAX_PADS]) {
 }
 
 // ─── Keyboard → pad fallback (player 0) ────────────────────────────────────
+//
+// The keyboard acts as a virtual gamepad so a cart is playable with no
+// controller attached. This runs IN ADDITION to any real pad rather than
+// instead of it: making it conditional on hotplug state would mean unplugging
+// a controller silently changed what keys do.
+//
+// The caller suppresses this while text input is active. See the call site.
 
 static void poll_keyboard_as_pad(wc_pad_t* pad) {
     const uint8_t* kb = SDL_GetKeyboardState(NULL);
@@ -449,7 +456,15 @@ int main(int argc, char* argv[]) {
         // Input
         wc_pad_t pads[WC_MAX_PADS];
         poll_pads(pads);
-        poll_keyboard_as_pad(&pads[0]);
+        // Not while the cart is taking text. The keyboard doubles as a virtual
+        // gamepad here, so without this guard typing a name also plays the
+        // game: "w" walks the player, Q/E fire the shoulders, Return presses
+        // Start. Gamepads are unaffected -- a controller keeps working while a
+        // text field is open, which is what you want for a d-pad character
+        // picker.
+        if (!wc_host_text_input_active(host)) {
+            poll_keyboard_as_pad(&pads[0]);
+        }
         wc_host_set_pads(host, pads);
 
         // Time
