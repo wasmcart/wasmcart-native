@@ -151,6 +151,12 @@ extern "C" void wc_host_destroy(wc_host_t* host) {
         delete (v8_host_state*)host->v8_state;
     }
     free(host->text_queue);
+    for (uint32_t i = 0; i < host->peer_count; i++) {
+        for (uint32_t k = 0; k < host->peers[i].events_len; k++)
+            free(host->peers[i].events[k].data);
+        free(host->peers[i].events);
+    }
+    free(host->peers);
     free(host);
 }
 
@@ -323,6 +329,278 @@ static void v8_wc_pad_rumble_stop(const v8::FunctionCallbackInfo<v8::Value>& arg
     host->rumble.stop(host->rumble.user, pad_id);
 }
 
+// ─── Peer connections (ABI v3) ───────────────────────────────────────────
+
+static wc_peer_t* peer_find(wc_host_t* host, int32_t id) {
+    for (uint32_t i = 0; i < host->peer_count; i++)
+        if (host->peers[i].id == id) return &host->peers[i];
+    return NULL;
+}
+
+static wc_peer_t* peer_alloc(wc_host_t* host) {
+    if (host->peer_count == host->peer_cap) {
+        uint32_t cap = host->peer_cap ? host->peer_cap * 2 : 8;
+        wc_peer_t* grown = (wc_peer_t*)realloc(host->peers, cap * sizeof(wc_peer_t));
+        if (!grown) return NULL;
+        host->peers = grown;
+        host->peer_cap = cap;
+    }
+    wc_peer_t* p = &host->peers[host->peer_count++];
+    memset(p, 0, sizeof(*p));
+    p->id = host->peer_next_id++;
+    p->state = WC_PEER_CONNECTING;
+    return p;
+}
+
+/* Queue an event for delivery on the next frame. Sockets fire at arbitrary
+ * points in node's loop, and re-entering the cart mid-frame is not safe. */
+static void peer_queue(wc_peer_t* p, int type, const uint8_t* data, uint32_t len) {
+    if (p->events_len == p->events_cap) {
+        uint32_t cap = p->events_cap ? p->events_cap * 2 : 8;
+        wc_peer_event_t* grown =
+            (wc_peer_event_t*)realloc(p->events, cap * sizeof(wc_peer_event_t));
+        if (!grown) return;  // drop the event rather than lose the cart
+        p->events = grown;
+        p->events_cap = cap;
+    }
+    wc_peer_event_t* ev = &p->events[p->events_len++];
+    ev->type = type;
+    ev->len = len;
+    ev->data = NULL;
+    if (data && len) {
+        ev->data = (uint8_t*)malloc(len);
+        if (ev->data) memcpy(ev->data, data, len);
+        else { ev->len = 0; }
+    }
+}
+
+/* Does the manifest grant this address? Mirrors the JS host exactly: the cart's
+ * flag AND a net grant AND a ws/wss scheme AND the hostname on the allowlist.
+ * Any one missing fails closed. */
+static bool peer_addr_granted(wc_host_t* host, const char* addr) {
+    if (!(host->info.flags & WC_FLAG_NET_PEER)) return false;
+    if (!host->manifest.has_net) return false;
+
+    /* Only ws:// and wss:// are implemented. A LAN or serial address would be
+     * gated by its own grant class, which does not exist yet. */
+    const char* rest;
+    if (strncmp(addr, "ws://", 5) == 0)       rest = addr + 5;
+    else if (strncmp(addr, "wss://", 6) == 0) rest = addr + 6;
+    else return false;
+
+    /* Hostname ends at ':', '/' or end of string. */
+    char hostname[256];
+    size_t n = 0;
+    while (rest[n] && rest[n] != ':' && rest[n] != '/' && n < sizeof(hostname) - 1) {
+        hostname[n] = rest[n];
+        n++;
+    }
+    hostname[n] = 0;
+    if (n == 0) return false;
+
+    if (host->manifest.ws_domain_count == 0) return false;
+    for (uint32_t i = 0; i < host->manifest.ws_domain_count; i++)
+        if (strcmp(host->manifest.ws_domains[i], hostname) == 0) return true;
+    return false;
+}
+
+/* Read a length-delimited string out of cart memory. Not NUL-terminated on the
+ * cart side, so bounds are checked against memory_size rather than trusted. */
+static bool read_cart_str(wc_host_t* host, uint32_t ptr, uint32_t len,
+                          char* dest, size_t dest_cap) {
+    if (!host->memory || len == 0 || len >= dest_cap) return false;
+    if ((uint64_t)ptr + len > host->memory_size) return false;
+    memcpy(dest, host->memory + ptr, len);
+    dest[len] = 0;
+    return true;
+}
+
+static void v8_wc_peer_open(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    args.GetReturnValue().Set(v8::Integer::New(g_isolate, -1));  // default: refused
+    if (!host) return;
+
+    char addr[512];
+    uint32_t ptr = args[0]->Uint32Value(ctx()).FromMaybe(0);
+    uint32_t len = args[1]->Uint32Value(ctx()).FromMaybe(0);
+    if (!read_cart_str(host, ptr, len, addr, sizeof addr)) return;
+
+    if (!peer_addr_granted(host, addr)) {
+        wc_log("wasmcart: wc_peer_open refused; the cart must set "
+               "WC_FLAG_NET_PEER and the manifest must grant that host\n");
+        return;
+    }
+
+    wc_peer_t* peer = peer_alloc(host);
+    if (!peer) return;
+    peer->transport = WC_TRANSPORT_RELIABLE | WC_TRANSPORT_ORDERED;
+    snprintf(peer->name, sizeof peer->name, "%s", addr);
+
+    /* Dial with node's own WebSocket -- the same implementation the JS host
+     * uses, so a cart needs no change between hosts. The socket lives on the JS
+     * side and pushes events onto a per-peer queue we drain each frame.
+     *
+     * The address is passed as a FUNCTION ARGUMENT, never spliced into the
+     * source: a cart-supplied string must not be able to close the quote and
+     * inject JS. That is the one place cart input reaches a compiler here. */
+    v8::Local<v8::String> src = v8str(
+        "(function(id, url) {"
+        "  const q = (globalThis.__wc_peerq ||= {});"
+        "  const ev = (q[id] = []);"
+        "  const w = new WebSocket(url);"
+        "  w.binaryType = 'arraybuffer';"
+        "  w.onopen    = () => ev.push({t:0});"
+        "  w.onmessage = (m) => ev.push({t:1, d:(typeof m.data === 'string')"
+        "      ? new TextEncoder().encode(m.data) : new Uint8Array(m.data)});"
+        "  w.onclose   = () => ev.push({t:2});"
+        "  w.onerror   = () => ev.push({t:3});"
+        "  (globalThis.__wc_peersock ||= {})[id] = w;"
+        "})");
+    v8::Local<v8::Script> script;
+    if (!v8::Script::Compile(ctx(), src).ToLocal(&script)) { host->peer_count--; return; }
+    v8::Local<v8::Value> fnv;
+    if (!script->Run(ctx()).ToLocal(&fnv) || !fnv->IsFunction()) { host->peer_count--; return; }
+
+    v8::Local<v8::Value> argv[2] = {
+        v8::Integer::New(g_isolate, peer->id),
+        v8str(addr),
+    };
+    v8::TryCatch tc(g_isolate);
+    node::CallbackScope scope(g_env, v8::Object::New(g_isolate), {0, 0});
+    if (fnv.As<v8::Function>()->Call(ctx(), ctx()->Global(), 2, argv).IsEmpty()) {
+        if (tc.HasCaught()) {
+            v8::String::Utf8Value e(g_isolate, tc.Exception());
+            wc_log("wasmcart: wc_peer_open failed: %s\n", *e);
+        }
+        host->peer_count--;
+        return;
+    }
+    args.GetReturnValue().Set(v8::Integer::New(g_isolate, peer->id));
+}
+
+/* Call a JS helper on the socket owned by the JS side. */
+static bool peer_js_call(int32_t id, const char* method,
+                         v8::Local<v8::Value> arg, bool has_arg) {
+    v8::Local<v8::Value> socks;
+    if (!ctx()->Global()->Get(ctx(), v8str("__wc_peersock")).ToLocal(&socks)
+        || !socks->IsObject()) return false;
+    v8::Local<v8::Value> w;
+    if (!socks.As<v8::Object>()->Get(ctx(), v8::Integer::New(g_isolate, id)).ToLocal(&w)
+        || !w->IsObject()) return false;
+    v8::Local<v8::Value> fn;
+    if (!w.As<v8::Object>()->Get(ctx(), v8str(method)).ToLocal(&fn) || !fn->IsFunction())
+        return false;
+    v8::TryCatch tc(g_isolate);
+    node::CallbackScope scope(g_env, v8::Object::New(g_isolate), {0, 0});
+    return !fn.As<v8::Function>()
+                ->Call(ctx(), w, has_arg ? 1 : 0, has_arg ? &arg : nullptr)
+                .IsEmpty();
+}
+
+static void v8_wc_peer_close(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    if (!host) return;
+    int32_t id = args[0]->Int32Value(ctx()).FromMaybe(-1);
+    wc_peer_t* p = peer_find(host, id);
+    if (!p) return;
+    p->state = WC_PEER_CLOSING;
+    if (p->host_supplied) {
+        peer_queue(p, WC_PEER_EV_DISCONNECT, NULL, 0);
+        p->state = WC_PEER_CLOSED;
+    } else {
+        peer_js_call(id, "close", v8::Local<v8::Value>(), false);
+    }
+}
+
+static int peer_send_bytes(wc_host_t* host, wc_peer_t* p,
+                           uint32_t ptr, uint32_t len) {
+    if (!host->memory || len == 0) return -1;
+    if ((uint64_t)ptr + len > host->memory_size) return -1;   /* untrusted */
+    if (p->state != WC_PEER_OPEN) return -1;
+
+    if (p->host_supplied) {
+        if (!p->send) return -1;
+        return p->send(p->user, host->memory + ptr, len) == 0 ? (int)len : -1;
+    }
+    /* Copy into a JS-owned buffer: the cart's memory can move under us when it
+     * grows, so handing a view straight to the socket is not safe. */
+    v8::Local<v8::ArrayBuffer> ab = v8::ArrayBuffer::New(g_isolate, len);
+    memcpy(ab->Data(), host->memory + ptr, len);
+    v8::Local<v8::Value> view = v8::Uint8Array::New(ab, 0, len);
+    return peer_js_call(p->id, "send", view, true) ? (int)len : -1;
+}
+
+static void v8_wc_peer_send(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    args.GetReturnValue().Set(v8::Integer::New(g_isolate, -1));
+    if (!host) return;
+    wc_peer_t* p = peer_find(host, args[0]->Int32Value(ctx()).FromMaybe(-1));
+    if (!p) return;
+    int r = peer_send_bytes(host, p,
+                            args[1]->Uint32Value(ctx()).FromMaybe(0),
+                            args[2]->Uint32Value(ctx()).FromMaybe(0));
+    args.GetReturnValue().Set(v8::Integer::New(g_isolate, r));
+}
+
+static void v8_wc_peer_broadcast(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    args.GetReturnValue().Set(v8::Integer::New(g_isolate, 0));
+    if (!host) return;
+    uint32_t ptr = args[0]->Uint32Value(ctx()).FromMaybe(0);
+    uint32_t len = args[1]->Uint32Value(ctx()).FromMaybe(0);
+    int sent = 0;
+    for (uint32_t i = 0; i < host->peer_count; i++)
+        if (peer_send_bytes(host, &host->peers[i], ptr, len) > 0) sent++;
+    args.GetReturnValue().Set(v8::Integer::New(g_isolate, sent));
+}
+
+static void v8_wc_peer_state(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    wc_peer_t* p = host ? peer_find(host, args[0]->Int32Value(ctx()).FromMaybe(-1)) : NULL;
+    args.GetReturnValue().Set(
+        v8::Integer::New(g_isolate, p ? p->state : WC_PEER_CLOSED));
+}
+
+static void v8_wc_peer_count(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    args.GetReturnValue().Set(
+        v8::Integer::New(g_isolate, host ? (int)host->peer_count : 0));
+}
+
+static void v8_wc_peer_id(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    uint32_t idx = args[0]->Uint32Value(ctx()).FromMaybe(0);
+    args.GetReturnValue().Set(v8::Integer::New(g_isolate,
+        (host && idx < host->peer_count) ? host->peers[idx].id : -1));
+}
+
+static void v8_wc_peer_name(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    args.GetReturnValue().Set(v8::Integer::New(g_isolate, 0));
+    if (!host || !host->memory) return;
+    wc_peer_t* p = peer_find(host, args[0]->Int32Value(ctx()).FromMaybe(-1));
+    if (!p) return;
+    uint32_t dest = args[1]->Uint32Value(ctx()).FromMaybe(0);
+    uint32_t cap  = args[2]->Uint32Value(ctx()).FromMaybe(0);
+    if (cap == 0 || (uint64_t)dest + cap > host->memory_size) return;
+
+    /* Truncate the TEXT and always NUL-terminate. Writing cap bytes and losing
+     * the terminator would hand the cart an unterminated string -- the same
+     * defect the JS host had and fixed. */
+    size_t n = strlen(p->name);
+    if (n > cap - 1) n = cap - 1;
+    memcpy(host->memory + dest, p->name, n);
+    host->memory[dest + n] = 0;
+    args.GetReturnValue().Set(v8::Integer::New(g_isolate, (int)n));
+}
+
+static void v8_wc_peer_transport(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    wc_peer_t* p = host ? peer_find(host, args[0]->Int32Value(ctx()).FromMaybe(-1)) : NULL;
+    args.GetReturnValue().Set(
+        v8::Integer::New(g_isolate, p ? (int)p->transport : WC_TRANSPORT_UNKNOWN));
+}
+
 // ─── Text input (ABI v3) ─────────────────────────────────────────────────
 // Three imports the cart drives, mirroring SDL_StartTextInput/StopTextInput.
 // Always provided, so a cart using text input is never a cart that fails to
@@ -368,6 +646,18 @@ static v8::Local<v8::Object> build_env_imports() {
     env->Set(ctx(), v8str("wc_text_input_begin"), make_fn(v8_wc_text_input_begin)).Check();
     env->Set(ctx(), v8str("wc_text_input_end"), make_fn(v8_wc_text_input_end)).Check();
     env->Set(ctx(), v8str("wc_text_input_active"), make_fn(v8_wc_text_input_active)).Check();
+    // Peer connections: always provided, so a networked cart links even where
+    // nothing can grant it access. wc_peer_open then refuses with -1, which the
+    // cart can see and act on -- unlike a missing import, which is a LinkError.
+    env->Set(ctx(), v8str("wc_peer_open"), make_fn(v8_wc_peer_open)).Check();
+    env->Set(ctx(), v8str("wc_peer_close"), make_fn(v8_wc_peer_close)).Check();
+    env->Set(ctx(), v8str("wc_peer_send"), make_fn(v8_wc_peer_send)).Check();
+    env->Set(ctx(), v8str("wc_peer_broadcast"), make_fn(v8_wc_peer_broadcast)).Check();
+    env->Set(ctx(), v8str("wc_peer_state"), make_fn(v8_wc_peer_state)).Check();
+    env->Set(ctx(), v8str("wc_peer_count"), make_fn(v8_wc_peer_count)).Check();
+    env->Set(ctx(), v8str("wc_peer_id"), make_fn(v8_wc_peer_id)).Check();
+    env->Set(ctx(), v8str("wc_peer_name"), make_fn(v8_wc_peer_name)).Check();
+    env->Set(ctx(), v8str("wc_peer_transport"), make_fn(v8_wc_peer_transport)).Check();
     return env;
 }
 
@@ -872,6 +1162,218 @@ extern "C" void wc_host_exit_v8(void) {
 
 // ─── Text input delivery ─────────────────────────────────────────────────
 
+/* Copy bytes into the cart's own heap so an export can be handed a pointer.
+ * Uses the cart's malloc: writing into spare linear memory is how the JS host
+ * once corrupted small carts, and there is no safe address to guess at.
+ * Deliberately does not free -- a cart's malloc may have no matching free
+ * exported, and leaking a few bytes per message beats calling one that is not
+ * there. Carts that care copy out and reuse a static buffer. */
+static bool stage_bytes(wc_host_t* host, const uint8_t* data, uint32_t len,
+                        uint32_t* out_ptr) {
+    if (!len) return false;
+    auto state = (v8_host_state*)host->v8_state;
+
+    /* Preferred: the cart's own allocator. */
+    if (!state->fn_malloc.IsEmpty()) {
+        v8::Local<v8::Value> arg = v8::Integer::NewFromUnsigned(g_isolate, len);
+        v8::Local<v8::Value> ret;
+        if (state->fn_malloc.Get(g_isolate)
+                ->Call(ctx(), ctx()->Global(), 1, &arg).ToLocal(&ret)) {
+            uint32_t ptr = ret->Uint32Value(ctx()).FromMaybe(0);
+            if (ptr) {
+                refresh_memory(host);
+                if (host->memory && (uint64_t)ptr + len <= host->memory_size) {
+                    memcpy(host->memory + ptr, data, len);
+                    *out_ptr = ptr;
+                    return true;
+                }
+            }
+        }
+    }
+
+    /* No allocator -- plenty of hand-written carts export none. Grow a scratch
+     * page onto the END of linear memory instead. It has to be grown rather
+     * than carved out of existing memory: reusing the tail is how the JS host
+     * once silently overwrote a small cart's statics. */
+    if (host->scratch_base == 0) {
+        auto mem = state->memory_obj.Get(g_isolate);
+        v8::Local<v8::Value> grow_v;
+        if (!mem->Get(ctx(), v8str("grow")).ToLocal(&grow_v) || !grow_v->IsFunction())
+            return false;
+        v8::Local<v8::Value> pages = v8::Integer::New(g_isolate, 1);
+        v8::Local<v8::Value> prev;
+        v8::TryCatch tc(g_isolate);
+        if (!grow_v.As<v8::Function>()->Call(ctx(), mem, 1, &pages).ToLocal(&prev)) {
+            /* Cart pinned its maximum. Dropping the message is recoverable;
+             * writing somewhere unproven is not. */
+            if (!host->scratch_warned) {
+                host->scratch_warned = true;
+                wc_log("wasmcart: cannot stage a %u-byte payload -- the cart "
+                       "exports no malloc and its memory cannot grow. Messages "
+                       "will be dropped.\n", len);
+            }
+            return false;
+        }
+        host->scratch_base = prev->Uint32Value(ctx()).FromMaybe(0) * 65536u;
+        refresh_memory(host);
+    }
+    if (len > 65536u) return false;
+    if (!host->memory || (uint64_t)host->scratch_base + len > host->memory_size)
+        return false;
+    memcpy(host->memory + host->scratch_base, data, len);
+    *out_ptr = host->scratch_base;
+    return true;
+}
+
+// ─── Peer event delivery ─────────────────────────────────────────────────
+
+/* Move events the JS side queued for dialled sockets into the C peer records.
+ * Done as a separate step so the cart is only ever entered from deliver_peers()
+ * at a known point in the frame. */
+static void drain_js_peer_events(wc_host_t* host) {
+    if (host->peer_count == 0) return;
+    v8::Local<v8::Value> qv;
+    if (!ctx()->Global()->Get(ctx(), v8str("__wc_peerq")).ToLocal(&qv) || !qv->IsObject())
+        return;
+    v8::Local<v8::Object> q = qv.As<v8::Object>();
+
+    for (uint32_t i = 0; i < host->peer_count; i++) {
+        wc_peer_t* p = &host->peers[i];
+        if (p->host_supplied) continue;
+        v8::Local<v8::Value> av;
+        if (!q->Get(ctx(), v8::Integer::New(g_isolate, p->id)).ToLocal(&av)
+            || !av->IsArray()) continue;
+        v8::Local<v8::Array> arr = av.As<v8::Array>();
+        uint32_t n = arr->Length();
+        for (uint32_t k = 0; k < n; k++) {
+            v8::Local<v8::Value> ev;
+            if (!arr->Get(ctx(), k).ToLocal(&ev) || !ev->IsObject()) continue;
+            v8::Local<v8::Object> o = ev.As<v8::Object>();
+            v8::Local<v8::Value> tv;
+            if (!o->Get(ctx(), v8str("t")).ToLocal(&tv)) continue;
+            int t = tv->Int32Value(ctx()).FromMaybe(-1);
+            if (t == 1) {
+                v8::Local<v8::Value> dv;
+                if (o->Get(ctx(), v8str("d")).ToLocal(&dv) && dv->IsUint8Array()) {
+                    v8::Local<v8::Uint8Array> u8 = dv.As<v8::Uint8Array>();
+                    size_t len = u8->ByteLength();
+                    uint8_t* tmp = (uint8_t*)malloc(len ? len : 1);
+                    if (tmp) {
+                        u8->CopyContents(tmp, len);
+                        peer_queue(p, WC_PEER_EV_MESSAGE, tmp, (uint32_t)len);
+                        free(tmp);
+                    }
+                }
+            } else if (t >= 0) {
+                peer_queue(p, t, NULL, 0);
+            }
+        }
+        if (n) {
+            /* Emptying by length keeps the same array the socket closes over. */
+            v8::Local<v8::Value> setlen;
+            if (arr->Set(ctx(), v8str("length"), v8::Integer::New(g_isolate, 0)).IsNothing())
+                (void)setlen;
+        }
+    }
+}
+
+/* Hand queued events to the cart's wc_peer_on_* exports. */
+static void deliver_peers(wc_host_t* host) {
+    if (host->peer_count == 0) return;
+    auto state = (v8_host_state*)host->v8_state;
+    auto exports = state->exports_obj.Get(g_isolate);
+
+    auto get_fn = [&](const char* name) -> v8::Local<v8::Function> {
+        v8::Local<v8::Value> v;
+        if (exports->Get(ctx(), v8str(name)).ToLocal(&v) && v->IsFunction())
+            return v.As<v8::Function>();
+        return v8::Local<v8::Function>();
+    };
+    auto on_connect    = get_fn("wc_peer_on_connect");
+    auto on_message    = get_fn("wc_peer_on_message");
+    auto on_disconnect = get_fn("wc_peer_on_disconnect");
+    auto on_error      = get_fn("wc_peer_on_error");
+
+    for (uint32_t i = 0; i < host->peer_count; i++) {
+        wc_peer_t* p = &host->peers[i];
+        for (uint32_t k = 0; k < p->events_len; k++) {
+            wc_peer_event_t* ev = &p->events[k];
+            v8::TryCatch tc(g_isolate);
+            if (ev->type == WC_PEER_EV_CONNECT) {
+                p->state = WC_PEER_OPEN;
+                if (!on_connect.IsEmpty()) {
+                    /* name is passed through the cart's own memory, so it needs
+                     * somewhere to land. Reuse the scratch path used elsewhere. */
+                    v8::Local<v8::Value> argv[3] = {
+                        v8::Integer::New(g_isolate, p->id),
+                        v8::Integer::NewFromUnsigned(g_isolate, 0),
+                        v8::Integer::NewFromUnsigned(g_isolate, 0),
+                    };
+                    (void)on_connect->Call(ctx(), ctx()->Global(), 3, argv);
+                }
+            } else if (ev->type == WC_PEER_EV_MESSAGE) {
+                if (!on_message.IsEmpty() && ev->data && ev->len) {
+                    uint32_t ptr = 0;
+                    if (stage_bytes(host, ev->data, ev->len, &ptr)) {
+                        v8::Local<v8::Value> argv[3] = {
+                            v8::Integer::New(g_isolate, p->id),
+                            v8::Integer::NewFromUnsigned(g_isolate, ptr),
+                            v8::Integer::NewFromUnsigned(g_isolate, ev->len),
+                        };
+                        (void)on_message->Call(ctx(), ctx()->Global(), 3, argv);
+                    }
+                }
+            } else if (ev->type == WC_PEER_EV_DISCONNECT) {
+                p->state = WC_PEER_CLOSED;
+                if (!on_disconnect.IsEmpty()) {
+                    v8::Local<v8::Value> a = v8::Integer::New(g_isolate, p->id);
+                    (void)on_disconnect->Call(ctx(), ctx()->Global(), 1, &a);
+                }
+            } else if (ev->type == WC_PEER_EV_ERROR) {
+                if (!on_error.IsEmpty()) {
+                    v8::Local<v8::Value> a = v8::Integer::New(g_isolate, p->id);
+                    (void)on_error->Call(ctx(), ctx()->Global(), 1, &a);
+                }
+            }
+            if (tc.HasCaught()) {
+                v8::String::Utf8Value e(g_isolate, tc.Exception());
+                wc_log("wasmcart: cart's wc_peer_on_* threw: %s\n", *e);
+            }
+            free(ev->data);
+        }
+        p->events_len = 0;
+    }
+}
+
+extern "C" int32_t wc_host_add_peer(wc_host_t* host, const char* name,
+                                   wc_peer_send_fn send, void* user,
+                                   uint32_t transport) {
+    if (!host) return -1;
+    wc_peer_t* p = peer_alloc(host);
+    if (!p) return -1;
+    p->host_supplied = true;
+    p->send = send;
+    p->user = user;
+    p->transport = transport;
+    p->state = WC_PEER_OPEN;   /* the host would not register a dead peer */
+    snprintf(p->name, sizeof p->name, "%s", name ? name : "");
+    peer_queue(p, WC_PEER_EV_CONNECT, NULL, 0);
+    return p->id;
+}
+
+extern "C" void wc_host_peer_recv(wc_host_t* host, int32_t peer_id,
+                                  const uint8_t* data, uint32_t len) {
+    if (!host) return;
+    wc_peer_t* p = peer_find(host, peer_id);
+    if (p) peer_queue(p, WC_PEER_EV_MESSAGE, data, len);
+}
+
+extern "C" void wc_host_remove_peer(wc_host_t* host, int32_t peer_id) {
+    if (!host) return;
+    wc_peer_t* p = peer_find(host, peer_id);
+    if (p) { p->state = WC_PEER_CLOSED; peer_queue(p, WC_PEER_EV_DISCONNECT, NULL, 0); }
+}
+
 extern "C" void wc_host_push_text(wc_host_t* host, const char* utf8, uint32_t len) {
     // Ignored unless the cart asked for text. That is what lets an embedder
     // forward every platform text event unconditionally without a cart that
@@ -991,6 +1493,41 @@ static void pump_node(wc_host_t* host) {
 
 /* Test hook: run `code`, then pump until globalThis[flag] is true.
  * Exported for test/net_test.c; not part of the public header. */
+/* Test hook: call a cart export by name with up to 3 uint32 args, returning its
+ * int32 result. Exported for the peer test; not part of the public header. */
+extern "C" int32_t wc_test_call_export(wc_host_t* host, const char* name,
+                                       uint32_t a, uint32_t b, uint32_t c, int argc) {
+    if (!host) return -1;
+    v8::HandleScope hs(g_isolate);
+    v8::Context::Scope cs(ctx());
+    auto state = (v8_host_state*)host->v8_state;
+    auto exports = state->exports_obj.Get(g_isolate);
+    v8::Local<v8::Value> fv;
+    if (!exports->Get(ctx(), v8str(name)).ToLocal(&fv) || !fv->IsFunction()) return -1;
+    v8::Local<v8::Value> argv[3] = {
+        v8::Integer::NewFromUnsigned(g_isolate, a),
+        v8::Integer::NewFromUnsigned(g_isolate, b),
+        v8::Integer::NewFromUnsigned(g_isolate, c),
+    };
+    v8::TryCatch tc(g_isolate);
+    node::CallbackScope scope(g_env, v8::Object::New(g_isolate), {0, 0});
+    v8::Local<v8::Value> r;
+    if (!fv.As<v8::Function>()->Call(ctx(), ctx()->Global(), argc, argv).ToLocal(&r)) {
+        if (tc.HasCaught()) { v8::String::Utf8Value e(g_isolate, tc.Exception());
+            wc_log("test export %s threw: %s\n", name, *e); }
+        return -1;
+    }
+    return r->Int32Value(ctx()).FromMaybe(-1);
+}
+
+/* Write bytes straight into cart memory at an absolute offset (test only). */
+extern "C" int wc_test_poke(wc_host_t* host, uint32_t off, const void* data, uint32_t len) {
+    if (!host || !host->memory) return -1;
+    if ((uint64_t)off + len > host->memory_size) return -1;
+    memcpy(host->memory + off, data, len);
+    return 0;
+}
+
 extern "C" int wc_test_eval_flag(const char* code, const char* flag, int iters) {
     v8::HandleScope hs(g_isolate);
     v8::Context::Scope cs(ctx());
@@ -1037,8 +1574,10 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     auto state = (v8_host_state*)host->v8_state;
     v8::TryCatch try_catch(g_isolate);
 
-    pump_node(host);     // let node's async work progress before the frame
-    deliver_text(host);  // before render, like every other input
+    pump_node(host);          // let node's async work progress before the frame
+    drain_js_peer_events(host); // move socket events into the peer records
+    deliver_peers(host);        // then into the cart, at a known point
+    deliver_text(host);         // before render, like every other input
 
     auto result = state->fn_wc_render.Get(g_isolate)->Call(
         ctx(), ctx()->Global(), 0, nullptr);

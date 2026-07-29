@@ -148,9 +148,28 @@ Carts reach the network through the `wc_peer_*` family, gated two ways: the cart
 sets `WC_FLAG_NET_PEER` to ask, and the packager grants specific hosts in the
 manifest. Neither alone is enough, and with no grant the host fails closed.
 
-The transport is node's, via the embedded libnode -- the same WebSocket
-implementation the Node host uses, so a cart that talks to a server in the
-browser talks to it here without change.
+Two ways a peer reaches a cart, with deliberately different security:
+
+| | Who dials | Grant needed |
+|---|---|---|
+| `wc_peer_open()` | the **cart** | `WC_FLAG_NET_PEER` **and** a manifest `net.domains` entry for that host |
+| `wc_host_add_peer()` | the **host** | none -- the host already chose it |
+
+The asymmetry is the point. Dialling out is allowlisted because the cart names a
+destination the packager may not have anticipated. A peer the host established
+needs no cart-side grant; requiring an embedder to write a manifest key
+permitting its own action would be ceremony.
+
+Dial-out is handled entirely inside the host using node's own WebSocket -- the
+same implementation the Node host uses, so a cart that talks to a server in the
+browser talks to it here without change, and an embedder does nothing. For a
+host-supplied peer the embedder provides a send callback, feeds inbound bytes
+with `wc_host_peer_recv()`, and reports a drop with `wc_host_remove_peer()`.
+
+Payloads are staged into the cart's own `malloc` where it exports one, and
+otherwise into a page grown onto the END of linear memory. Never into spare
+existing memory: that is how the JS host once silently overwrote a small cart's
+statics.
 
 Async work (connections, messages, timers) advances once per frame from
 `wc_host_run_frame()`. An embedder driving async work outside a frame loop --
@@ -192,6 +211,7 @@ node ../wasmcart/test/wsserver.mjs --port 8796 &   # from the wasmcart repo
 ./rumble_test ../wasmcart/test/fixtures/rumble.wasc
 ./text_test  test/textauto.wasc 5436 5440 5444 5456
 sh test/input_guard_test.sh   # keyboard is not also a gamepad while typing
+./peer_test 8796 <granted.wasc> <ungranted.wasc>   # wc_peer_* end to end
 ```
 
 `text_test` takes the cart's debug-field offsets as arguments because they move

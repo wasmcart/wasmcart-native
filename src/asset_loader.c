@@ -225,15 +225,24 @@ int wc_parse_manifest(wc_host_t* host, const char* json, size_t len) {
 
     cJSON* net = cJSON_GetObjectItem(root, "net");
     if (cJSON_IsObject(net)) {
-        cJSON* ws = cJSON_GetObjectItem(net, "websocket");
-        if (cJSON_IsArray(ws)) {
+        // The presence of `net` at all is half the gate: wc_peer_open refuses
+        // without it even if the cart set WC_FLAG_NET_PEER.
+        host->manifest.has_net = true;
+
+        // net.domains is the current spelling; net.websocket is the superseded
+        // one, still read so manifests written before the wc_peer_* merge keep
+        // working. Same precedence as the JS host.
+        cJSON* domains = cJSON_GetObjectItem(net, "domains");
+        if (!cJSON_IsArray(domains)) domains = cJSON_GetObjectItem(net, "websocket");
+        if (cJSON_IsArray(domains)) {
             host->manifest.websocket = true;
             host->manifest.ws_domain_count = 0;
             cJSON* domain;
-            cJSON_ArrayForEach(domain, ws) {
+            cJSON_ArrayForEach(domain, domains) {
                 if (cJSON_IsString(domain) && host->manifest.ws_domain_count < 8) {
                     strncpy(host->manifest.ws_domains[host->manifest.ws_domain_count],
                             domain->valuestring, 255);
+                    host->manifest.ws_domains[host->manifest.ws_domain_count][255] = 0;
                     host->manifest.ws_domain_count++;
                 }
             }

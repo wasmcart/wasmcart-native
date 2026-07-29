@@ -8,6 +8,35 @@
 
 // ─── Internal host struct ──────────────────────────────────────────────────
 
+// One queued peer event, drained into the cart's wc_peer_on_* exports once per
+// frame. Queued rather than delivered inline because a socket callback can fire
+// at any point in node's loop, and re-entering the cart mid-frame is not safe.
+typedef struct {
+    int      type;      // WC_PEER_EV_*
+    uint8_t* data;      // message payload (owned), NULL for non-message events
+    uint32_t len;
+} wc_peer_event_t;
+
+#define WC_PEER_EV_CONNECT    0
+#define WC_PEER_EV_MESSAGE    1
+#define WC_PEER_EV_DISCONNECT 2
+#define WC_PEER_EV_ERROR      3
+
+typedef struct {
+    int32_t  id;
+    char     name[128];     // display only, NOT a handle, never trusted
+    int      state;         // WC_PEER_CONNECTING / OPEN / CLOSING / CLOSED
+    uint32_t transport;     // WC_TRANSPORT_* bitmask
+    bool     host_supplied; // came from wc_host_add_peer, not wc_peer_open
+    void*    js_ws;         // v8::Global<v8::Object>* for a dialled WebSocket
+    void*    user;          // embedder pointer for a host-supplied peer
+    wc_peer_send_fn send;   // host-supplied peers only
+
+    wc_peer_event_t* events;
+    uint32_t events_len;
+    uint32_t events_cap;
+} wc_peer_t;
+
 struct wc_host {
     // V8 state (opaque, managed by cart_host.cpp)
     void* v8_state;
@@ -63,6 +92,26 @@ struct wc_host {
     char* text_queue;        // NUL-separated UTF-8 strings
     size_t text_queue_len;
     size_t text_queue_cap;
+
+    // Peer connections (ABI v3). Two kinds live in one table on purpose: a
+    // connection the CART dialled (wc_peer_open) and a peer the HOST handed it
+    // (wc_host_add_peer) are the same object to the cart, which is the whole
+    // point of hiding transport behind wc_peer_*.
+    //
+    // The security asymmetry is deliberate and matches the JS host: dialling
+    // out is allowlisted, because the cart names a destination the packager may
+    // not have anticipated. A host-supplied peer needs no grant -- the host
+    // already chose it.
+    wc_peer_t* peers;
+    uint32_t   peer_count;
+    uint32_t   peer_cap;
+    int32_t    peer_next_id;
+
+    // Grown-on-demand staging page for host->cart payloads when the cart
+    // exports no malloc. Grown past everything the cart owns so it cannot
+    // alias cart data. 0 = not yet claimed.
+    uint32_t scratch_base;
+    bool     scratch_warned;
 };
 
 // ─── Asset loading ─────────────────────────────────────────────────────

@@ -41,8 +41,10 @@ extern "C" {
 
 // Cart info flags
 #define WC_FLAG_AUDIO_F32 (1 << 0)
-#define WC_FLAG_NET_WS    (1 << 1)
-#define WC_FLAG_NET_DC    (1 << 2)
+#define WC_FLAG_NET_PEER  (1 << 1)  // cart wants peer-connection imports
+// (1 << 2) is RESERVED AND UNUSED — it was WC_FLAG_NET_DC before the WebSocket
+// and data-channel families merged into one peer-connection family. Hosts must
+// ignore it; carts must not set it. WC_FLAG_NET_PEER governs all networking.
 #define WC_FLAG_POINTER   (1 << 3)
 #define WC_FLAG_KEYBOARD  (1 << 4)
 
@@ -103,6 +105,7 @@ typedef struct {
     bool     data_channel;
     char     ws_domains[8][256]; // up to 8 allowed domains
     uint32_t ws_domain_count;
+    bool     has_net;            // a "net" object was present at all
 } wc_manifest_t;
 
 // Options for loading a cart
@@ -186,6 +189,55 @@ void wc_host_set_pads(wc_host_t* host, const wc_pad_t pads[WC_MAX_PADS]);
 void wc_host_set_keyboard(wc_host_t* host, const uint8_t keys[WC_KEYS_STATE_SIZE]);
 void wc_host_set_pointer(wc_host_t* host, int index, int16_t x, int16_t y, uint8_t buttons, uint8_t active);
 void wc_host_set_time(wc_host_t* host, double time_ms, double delta_ms, uint32_t frame);
+
+// ─── Peer connections (ABI v3) ─────────────────────────────────────────────
+//
+// One networking primitive: a connection to a peer. The cart opens one, sends
+// bytes, receives bytes, and is told when it opens or closes. Transport stays
+// opaque -- a peer is the same object to the cart whether it arrived over a
+// WebSocket, a LAN socket or a serial cable.
+//
+// Two ways a peer appears, with deliberately different security:
+//
+//   wc_peer_open()      the CART dials. Requires BOTH the cart's
+//                       WC_FLAG_NET_PEER and a manifest net grant covering the
+//                       address. Fails closed. Handled entirely inside the
+//                       host using node's WebSocket -- an embedder does nothing.
+//
+//   wc_host_add_peer()  the HOST hands the cart a peer it established itself.
+//                       No manifest grant needed: the host already made that
+//                       decision, and requiring it to also write a manifest key
+//                       permitting its own action would be ceremony.
+//
+// A host-supplied peer needs a send callback, because only the embedder knows
+// how to put bytes on its transport. Feed inbound bytes back with
+// wc_host_peer_recv(), and report a drop with wc_host_remove_peer().
+
+#define WC_PEER_CONNECTING 0
+#define WC_PEER_OPEN       1
+#define WC_PEER_CLOSING    2
+#define WC_PEER_CLOSED     3
+
+#define WC_TRANSPORT_UNKNOWN     0x00
+#define WC_TRANSPORT_RELIABLE    0x01
+#define WC_TRANSPORT_ORDERED     0x02
+#define WC_TRANSPORT_LOW_LATENCY 0x04
+
+// Return 0 on success, non-zero to signal the send failed.
+typedef int (*wc_peer_send_fn)(void* user, const uint8_t* data, uint32_t len);
+
+// Register a peer the host established. `name` is display-only and is never
+// treated as a handle. Returns the peer id, or -1 if the table is full.
+int32_t wc_host_add_peer(wc_host_t* host, const char* name,
+                         wc_peer_send_fn send, void* user, uint32_t transport);
+
+// Deliver bytes that arrived on a host-supplied peer.
+void wc_host_peer_recv(wc_host_t* host, int32_t peer_id,
+                       const uint8_t* data, uint32_t len);
+
+// Report that a host-supplied peer went away. The cart sees
+// wc_peer_on_disconnect on the next frame.
+void wc_host_remove_peer(wc_host_t* host, int32_t peer_id);
 
 // Advance node's event loop without running a frame. wc_host_run_frame() does
 // this for you; call it directly only when driving async work outside the
