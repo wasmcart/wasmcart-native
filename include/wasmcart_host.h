@@ -157,6 +157,30 @@ typedef struct {
 // Pass NULL to detach. Safe to call before or after loading a cart.
 void wc_host_set_rumble_backend(wc_host_t* host, const wc_rumble_backend_t* backend);
 
+// ─── Text input (ABI v3) ───────────────────────────────────────────────────
+//
+// Characters, not scancodes. A scancode is a key POSITION: Shift+2 is "@" on a
+// US layout and something else on many others, and an accented character may
+// take a dead-key sequence or an IME commit with no scancode of its own. The
+// platform already resolved all of that, so the host forwards the result rather
+// than making every cart reimplement keyboard layouts.
+//
+// This is the same split every engine draws -- SDL_TEXTINPUT vs SDL_KEYDOWN,
+// glfwSetCharCallback vs glfwSetKeyCallback, WM_CHAR vs WM_KEYDOWN. The raw
+// keyboard ABI stays for gameplay and for editing keys (backspace, arrows,
+// enter), which are presses rather than characters.
+//
+// Feed it whatever the platform gives you: an SDL_TEXTINPUT event's `text` is
+// exactly right. Text is IGNORED unless the cart has called
+// wc_text_input_begin(), so it is safe to forward unconditionally.
+//
+// While text input is active an embedder SHOULD suppress its own key bindings:
+// typing "q" into a name field must not quit, and "w" must not also walk the
+// player forward. wc_host_text_input_active() reports the state; on platforms
+// with an on-screen keyboard it is also the signal to raise and dismiss it.
+void wc_host_push_text(wc_host_t* host, const char* utf8, uint32_t len);
+int  wc_host_text_input_active(wc_host_t* host);
+
 // Input — call before wc_host_run_frame()
 void wc_host_set_pads(wc_host_t* host, const wc_pad_t pads[WC_MAX_PADS]);
 void wc_host_set_keyboard(wc_host_t* host, const uint8_t keys[WC_KEYS_STATE_SIZE]);

@@ -148,6 +148,7 @@ extern "C" void wc_host_destroy(wc_host_t* host) {
     if (host->v8_state) {
         delete (v8_host_state*)host->v8_state;
     }
+    free(host->text_queue);
     free(host);
 }
 
@@ -320,6 +321,32 @@ static void v8_wc_pad_rumble_stop(const v8::FunctionCallbackInfo<v8::Value>& arg
     host->rumble.stop(host->rumble.user, pad_id);
 }
 
+// ─── Text input (ABI v3) ─────────────────────────────────────────────────
+// Three imports the cart drives, mirroring SDL_StartTextInput/StopTextInput.
+// Always provided, so a cart using text input is never a cart that fails to
+// load; with no platform feeding wc_host_push_text they simply never fire.
+
+static void v8_wc_text_input_begin(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    (void)args;
+    if (_current_host) _current_host->text_active = true;
+}
+
+static void v8_wc_text_input_end(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    (void)args;
+    wc_host_t* host = _current_host;
+    if (!host) return;
+    host->text_active = false;
+    // Drop anything queued but undelivered: text typed before the cart stopped
+    // listening must not surface in the next field it opens.
+    host->text_queue_len = 0;
+}
+
+static void v8_wc_text_input_active(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    args.GetReturnValue().Set(
+        v8::Integer::New(g_isolate, (host && host->text_active) ? 1 : 0));
+}
+
 // Build the env import object
 static v8::Local<v8::Object> build_env_imports() {
     auto env = v8::Object::New(g_isolate);
@@ -335,6 +362,10 @@ static v8::Local<v8::Object> build_env_imports() {
     env->Set(ctx(), v8str("wc_pad_has_rumble"), make_fn(v8_wc_pad_has_rumble)).Check();
     env->Set(ctx(), v8str("wc_pad_rumble"), make_fn(v8_wc_pad_rumble)).Check();
     env->Set(ctx(), v8str("wc_pad_rumble_stop"), make_fn(v8_wc_pad_rumble_stop)).Check();
+    // Text input: likewise always provided.
+    env->Set(ctx(), v8str("wc_text_input_begin"), make_fn(v8_wc_text_input_begin)).Check();
+    env->Set(ctx(), v8str("wc_text_input_end"), make_fn(v8_wc_text_input_end)).Check();
+    env->Set(ctx(), v8str("wc_text_input_active"), make_fn(v8_wc_text_input_active)).Check();
     return env;
 }
 
@@ -837,6 +868,99 @@ extern "C" void wc_host_exit_v8(void) {
     delete g_persistent_locker; g_persistent_locker = nullptr;
 }
 
+// ─── Text input delivery ─────────────────────────────────────────────────
+
+extern "C" void wc_host_push_text(wc_host_t* host, const char* utf8, uint32_t len) {
+    // Ignored unless the cart asked for text. That is what lets an embedder
+    // forward every platform text event unconditionally without a cart that
+    // never wanted text ever seeing one.
+    if (!host || !host->text_active || !utf8 || len == 0) return;
+
+    size_t need = host->text_queue_len + len + 1; // +1 for the separator
+    if (need > host->text_queue_cap) {
+        size_t cap = host->text_queue_cap ? host->text_queue_cap * 2 : 256;
+        while (cap < need) cap *= 2;
+        char* grown = (char*)realloc(host->text_queue, cap);
+        if (!grown) return;  // out of memory: drop the keystroke, keep the cart
+        host->text_queue = grown;
+        host->text_queue_cap = cap;
+    }
+    memcpy(host->text_queue + host->text_queue_len, utf8, len);
+    host->text_queue_len += len;
+    host->text_queue[host->text_queue_len++] = '\0'; // separator
+}
+
+extern "C" int wc_host_text_input_active(wc_host_t* host) {
+    return (host && host->text_active) ? 1 : 0;
+}
+
+// Hand each queued string to the cart's wc_on_text, staged through the cart's
+// own malloc. Called with a HandleScope already open.
+static void deliver_text(wc_host_t* host) {
+    if (host->text_queue_len == 0) return;
+
+    auto state = (v8_host_state*)host->v8_state;
+    auto exports = state->exports_obj.Get(g_isolate);
+    auto key = v8str("wc_on_text");
+    v8::Local<v8::Value> val;
+    if (!exports->Get(ctx(), key).ToLocal(&val) || !val->IsFunction()) {
+        // A cart may enable text input without exporting the handler (it might
+        // only want a mobile keyboard raised). Drop rather than grow forever.
+        host->text_queue_len = 0;
+        return;
+    }
+    auto fn = val.As<v8::Function>();
+
+    if (state->fn_malloc.IsEmpty()) {
+        // No allocator: there is nowhere safe to stage the bytes. Writing into
+        // spare linear memory is how the JS host corrupted small carts, so drop
+        // instead and say why, once.
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            wc_log("wasmcart: cart exports wc_on_text but no malloc; text cannot "
+                   "be staged and will be dropped.\n");
+        }
+        host->text_queue_len = 0;
+        return;
+    }
+    auto malloc_fn = state->fn_malloc.Get(g_isolate);
+
+    size_t pos = 0;
+    while (pos < host->text_queue_len) {
+        const char* str = host->text_queue + pos;
+        size_t slen = strlen(str);
+        pos += slen + 1;
+        if (slen == 0) continue;
+
+        v8::Local<v8::Value> mlen = v8::Integer::NewFromUnsigned(g_isolate, (uint32_t)slen);
+        v8::Local<v8::Value> mret;
+        if (!malloc_fn->Call(ctx(), ctx()->Global(), 1, &mlen).ToLocal(&mret)) continue;
+        uint32_t ptr = mret->Uint32Value(ctx()).FromMaybe(0);
+        if (ptr == 0) continue;
+
+        refresh_memory(host);
+        if (!host->memory || ptr + slen > host->memory_size) continue;
+        memcpy(host->memory + ptr, str, slen);
+
+        v8::Local<v8::Value> argv[2] = {
+            v8::Integer::NewFromUnsigned(g_isolate, ptr),
+            v8::Integer::NewFromUnsigned(g_isolate, (uint32_t)slen),
+        };
+        v8::TryCatch tc(g_isolate);
+        v8::MaybeLocal<v8::Value> unused = fn->Call(ctx(), ctx()->Global(), 2, argv);
+        (void)unused;
+        if (tc.HasCaught()) {
+            v8::String::Utf8Value err(g_isolate, tc.Exception());
+            wc_log("wasmcart: cart's wc_on_text() threw: %s\n", *err);
+        }
+        // Deliberately not freeing: the cart's malloc may have no matching free
+        // exported, and leaking a few bytes per keystroke beats calling a
+        // free() that does not exist. Carts that care can reuse a static buffer.
+    }
+    host->text_queue_len = 0;
+}
+
 extern "C" void wc_host_run_frame(wc_host_t* host) {
     if (!host->fn_wc_render || host->trapped) return;
 
@@ -846,6 +970,8 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
 
     auto state = (v8_host_state*)host->v8_state;
     v8::TryCatch try_catch(g_isolate);
+
+    deliver_text(host);  // before render, like every other input
 
     auto result = state->fn_wc_render.Get(g_isolate)->Call(
         ctx(), ctx()->Global(), 0, nullptr);

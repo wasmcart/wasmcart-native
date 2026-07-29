@@ -400,12 +400,32 @@ int main(int argc, char* argv[]) {
     while (running) {
         uint64_t now = SDL_GetTicks64();
 
+        // SDL only emits SDL_TEXTINPUT between StartTextInput and
+        // StopTextInput, so mirror whatever the cart asked for. This is also
+        // what raises and dismisses the on-screen keyboard on mobile.
+        {
+            static bool text_started = false;
+            bool want = wc_host_text_input_active(host) != 0;
+            if (want != text_started) {
+                if (want) SDL_StartTextInput(); else SDL_StopTextInput();
+                text_started = want;
+            }
+        }
+
         // Events
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             switch (event.type) {
                 case SDL_QUIT:
                     running = false;
+                    break;
+                case SDL_TEXTINPUT:
+                    // Characters, already resolved by the OS: layout, shift,
+                    // dead keys and IME composition are all applied before this
+                    // arrives. Forwarded unconditionally -- the host ignores it
+                    // unless the cart called wc_text_input_begin().
+                    wc_host_push_text(host, event.text.text,
+                                      (uint32_t)strlen(event.text.text));
                     break;
                 case SDL_CONTROLLERDEVICEADDED:
                     open_controller(event.cdevice.which);

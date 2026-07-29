@@ -48,6 +48,21 @@ struct wc_host {
     // has_rumble == NULL means "no backend": the imports become silent no-ops
     // and wc_pad_has_rumble reports 0.
     wc_rumble_backend_t rumble;
+
+    // Text input (ABI v3). Characters, not scancodes -- the platform has
+    // already applied layout, shift, dead keys and IME composition, which is
+    // work a cart must never redo. Same split every engine uses: SDL_TEXTINPUT
+    // vs SDL_KEYDOWN, glfwSetCharCallback vs glfwSetKeyCallback, WM_CHAR vs
+    // WM_KEYDOWN.
+    //
+    // Off until the cart calls wc_text_input_begin(), so a cart that never asks
+    // cannot be surprised by text and an embedder may forward platform text
+    // unconditionally. Queued strings are dropped on end(), so what was typed
+    // into one field cannot resurface in the next.
+    bool  text_active;
+    char* text_queue;        // NUL-separated UTF-8 strings
+    size_t text_queue_len;
+    size_t text_queue_cap;
 };
 
 // ─── Asset loading ─────────────────────────────────────────────────────
