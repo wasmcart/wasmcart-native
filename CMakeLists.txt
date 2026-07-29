@@ -126,7 +126,18 @@ else()
         pkg_check_modules(SDL2 sdl2)
         if(SDL2_FOUND)
             target_include_directories(wasmcart-run PRIVATE ${SDL2_INCLUDE_DIRS})
-            target_link_libraries(wasmcart-run PRIVATE ${SDL2_LIBRARIES})
+            # Drop SDL2main: sdl2.pc still advertises it, but Homebrew's arm64
+            # SDL2 ships no libSDL2main, so the link fails with
+            # "ld: library 'SDL2main' not found". It is a WinMain shim we do not
+            # need -- src/main.c defines a plain main() and SDL_MAIN_HANDLED is
+            # the norm on unix. Windows links SDL2main.lib explicitly above.
+            set(SDL2_LINK_LIBS "")
+            foreach(_lib ${SDL2_LIBRARIES})
+                if(NOT _lib STREQUAL "SDL2main")
+                    list(APPEND SDL2_LINK_LIBS ${_lib})
+                endif()
+            endforeach()
+            target_link_libraries(wasmcart-run PRIVATE ${SDL2_LINK_LIBS})
         endif()
     endif()
 endif()
