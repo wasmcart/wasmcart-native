@@ -137,6 +137,11 @@ else()
                     list(APPEND SDL2_LINK_LIBS ${_lib})
                 endif()
             endforeach()
+            # pkg_check_modules gives library NAMES; without the matching -L
+            # the linker cannot find them. On arm64 macOS Homebrew lives in
+            # /opt/homebrew, not /usr/local, so omitting this failed with
+            # "ld: library 'SDL2' not found".
+            target_link_directories(wasmcart-run PRIVATE ${SDL2_LIBRARY_DIRS})
             target_link_libraries(wasmcart-run PRIVATE ${SDL2_LINK_LIBS})
         endif()
     endif()
