@@ -129,6 +129,34 @@ int  wc_host_load_file(wc_host_t* host, const char* wasc_path, const wc_host_opt
 int  wc_host_load_memory(wc_host_t* host, const uint8_t* data, size_t len, const wc_host_options_t* opts);
 int  wc_host_finish_init(wc_host_t* host);  // call after GL context ready if defer_init was set
 
+// ─── Rumble (ABI v3) ───────────────────────────────────────────────────────
+//
+// Rumble runs the OPPOSITE way to the rest of input: the cart drives it, so it
+// arrives as three host imports rather than a field in wc_pad_t. The embedder
+// supplies a backend (libretro's rumble interface, SDL, ...); with none set the
+// imports are silent no-ops and has_rumble reports 0, which is the honest
+// answer for a keyboard-only setup.
+//
+// The host library clamps and caps before calling through, so a backend only
+// has to translate: low/high arrive already in 0..1 and duration_ms already
+// capped at WC_RUMBLE_MAX_MS.
+//
+// low  = low-frequency / "strong" motor      high = high-frequency / "weak"
+#define WC_RUMBLE_MAX_MS 5000
+
+typedef struct {
+    // Return non-zero if THIS pad can rumble. Per-device, not per-platform:
+    // an X360 pad reports rumble but no trigger rumble.
+    int  (*has_rumble)(void* user, uint32_t pad_id);
+    void (*rumble)(void* user, uint32_t pad_id, float low, float high,
+                   uint32_t duration_ms);
+    void (*stop)(void* user, uint32_t pad_id);
+    void* user;
+} wc_rumble_backend_t;
+
+// Pass NULL to detach. Safe to call before or after loading a cart.
+void wc_host_set_rumble_backend(wc_host_t* host, const wc_rumble_backend_t* backend);
+
 // Input — call before wc_host_run_frame()
 void wc_host_set_pads(wc_host_t* host, const wc_pad_t pads[WC_MAX_PADS]);
 void wc_host_set_keyboard(wc_host_t* host, const uint8_t keys[WC_KEYS_STATE_SIZE]);

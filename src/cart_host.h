@@ -43,6 +43,11 @@ struct wc_host {
 
     // .wasc archive (kept open for wc_load_asset)
     void* archive;  // mz_zip_archive*
+
+    // Rumble backend supplied by the embedder (libretro, SDL, ...).
+    // has_rumble == NULL means "no backend": the imports become silent no-ops
+    // and wc_pad_has_rumble reports 0.
+    wc_rumble_backend_t rumble;
 };
 
 // ─── Asset loading ─────────────────────────────────────────────────────

@@ -272,6 +272,54 @@ static void v8_noop_return_0(const v8::FunctionCallbackInfo<v8::Value>& args) {
 }
 
 
+// ─── Rumble imports (ABI v3) ───────────────────────────────────────────────
+//
+// The cart drives these, unlike the rest of input. Clamping happens HERE rather
+// than in each backend: SPEC.md says out-of-range values clamp instead of being
+// rejected, because a cart deriving intensity from game state (damage, distance)
+// overshoots at the edges and a dropped rumble is harder to diagnose than a
+// saturated one. NaN becomes 0 -- note (v != v) is the NaN test, since a plain
+// comparison chain would let it through.
+static float wc_clamp01(double v) {
+    if (v != v) return 0.0f;            // NaN
+    if (v < 0.0) return 0.0f;
+    if (v > 1.0) return 1.0f;
+    return (float)v;
+}
+
+static void v8_wc_pad_has_rumble(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    uint32_t pad_id = args[0]->Uint32Value(ctx()).FromJust();
+    int result = 0;
+    if (host && host->rumble.has_rumble && pad_id < WC_MAX_PADS)
+        result = host->rumble.has_rumble(host->rumble.user, pad_id) ? 1 : 0;
+    args.GetReturnValue().Set(v8::Integer::New(g_isolate, result));
+}
+
+static void v8_wc_pad_rumble(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    uint32_t pad_id = args[0]->Uint32Value(ctx()).FromJust();
+    if (!host || !host->rumble.rumble || pad_id >= WC_MAX_PADS) return;
+
+    float low  = wc_clamp01(args[1]->NumberValue(ctx()).FromMaybe(0.0));
+    float high = wc_clamp01(args[2]->NumberValue(ctx()).FromMaybe(0.0));
+    double raw = args[3]->NumberValue(ctx()).FromMaybe(0.0);
+    if (raw != raw || raw < 0.0) raw = 0.0;
+    uint32_t dur = (raw > (double)WC_RUMBLE_MAX_MS)
+                       ? WC_RUMBLE_MAX_MS : (uint32_t)raw;
+    /* Zero duration is a no-op, not an infinite effect: the cap exists so a
+     * cart that crashes mid-effect cannot pin the motors forever. */
+    if (dur == 0) return;
+    host->rumble.rumble(host->rumble.user, pad_id, low, high, dur);
+}
+
+static void v8_wc_pad_rumble_stop(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    uint32_t pad_id = args[0]->Uint32Value(ctx()).FromJust();
+    if (!host || !host->rumble.stop || pad_id >= WC_MAX_PADS) return;
+    host->rumble.stop(host->rumble.user, pad_id);
+}
+
 // Build the env import object
 static v8::Local<v8::Object> build_env_imports() {
     auto env = v8::Object::New(g_isolate);
@@ -282,6 +330,11 @@ static v8::Local<v8::Object> build_env_imports() {
     env->Set(ctx(), v8str("emscripten_memcpy_js"), make_fn(v8_emscripten_memcpy_js)).Check();
     env->Set(ctx(), v8str("emscripten_stack_init"), make_fn(v8_noop)).Check();
     env->Set(ctx(), v8str("__cxa_atexit"), make_fn(v8_noop_return_0)).Check();
+    // Rumble: always provided, so a cart that rumbles is never a cart that
+    // fails to load. With no backend wired they are silent no-ops.
+    env->Set(ctx(), v8str("wc_pad_has_rumble"), make_fn(v8_wc_pad_has_rumble)).Check();
+    env->Set(ctx(), v8str("wc_pad_rumble"), make_fn(v8_wc_pad_rumble)).Check();
+    env->Set(ctx(), v8str("wc_pad_rumble_stop"), make_fn(v8_wc_pad_rumble_stop)).Check();
     return env;
 }
 
@@ -728,6 +781,17 @@ extern "C" int wc_host_finish_init(wc_host_t* host) {
 }
 
 // ─── Input (unchanged — just writes to host->memory) ──────────────────
+
+extern "C" void wc_host_set_rumble_backend(wc_host_t* host,
+                                           const wc_rumble_backend_t* backend) {
+    if (!host) return;
+    if (backend) {
+        host->rumble = *backend;
+    } else {
+        /* Detach: zeroing has_rumble is what makes the imports no-ops. */
+        memset(&host->rumble, 0, sizeof(host->rumble));
+    }
+}
 
 extern "C" void wc_host_set_pads(wc_host_t* host, const wc_pad_t pads[WC_MAX_PADS]) {
     if (!host->memory || !host->info.input_ptr) return;
