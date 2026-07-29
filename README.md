@@ -121,10 +121,40 @@ wasmcart-run (75MB, statically linked)
 - **Keyboard**: Arrow keys / WASD / Z / X mapped to gamepad for pad-only carts
 - **4 players**: Up to 4 controllers supported simultaneously
 - **Hot-plug**: Controllers can be connected/disconnected during play
+- **Rumble**: `wc_pad_rumble` routed to SDL2's haptics, with the ABI's clamping
+  applied once in the host library so every embedder behaves the same
+- **Text input**: `wc_on_text` fed from `SDL_TEXTINPUT`, so a cart receives
+  characters the OS already composed -- layout, shift, dead keys and IME -- and
+  never has to reimplement a keyboard layout. `SDL_StartTextInput` is mirrored
+  from the cart's own state, which is also the on-screen keyboard signal on
+  platforms that have one
 
 ## Resolution
 
 The host passes preferred resolution to the cart via `--res`. The cart decides its actual rendering resolution. The host scales the output to fit the window, preserving aspect ratio with letterboxing. Without `--res`, the window matches the cart's native resolution.
+
+## Networking
+
+Carts reach the network through the `wc_peer_*` family, gated two ways: the cart
+sets `WC_FLAG_NET_PEER` to ask, and the packager grants specific hosts in the
+manifest. Neither alone is enough, and with no grant the host fails closed.
+
+The transport is node's, via the embedded libnode -- the same WebSocket
+implementation the Node host uses, so a cart that talks to a server in the
+browser talks to it here without change.
+
+Async work (connections, messages, timers) advances once per frame from
+`wc_host_run_frame()`. An embedder driving async work outside a frame loop --
+waiting for a connection before starting the cart, say -- can call
+`wc_host_pump()` directly.
+
+> Embedding note: node's event loop needs three things pumped together, and
+> missing any one breaks a different part of node in ways that look unrelated.
+> `process.nextTick` is drained by `node::CallbackScope`, NOT by `uv_run`, and
+> `net.Socket.connect()` defers its dial through nextTick -- so without it
+> sockets sit in `connecting` forever with no error and no syscall ever issued,
+> while timers, `setImmediate`, `fs` and even `dns.lookup` all keep working.
+> `test/net_test.c` pins this.
 
 ## Rendering Modes
 
@@ -136,6 +166,35 @@ Determined by the cart's `gpu_api` field:
 | 1 | WebGL2 / GLES3 | EGL window surface + FBO redirect + letterboxing |
 
 ## Development Notes
+
+### Tests
+
+Standalone C programs against the built library, not a framework. Each takes a
+cart and asserts on what the cart observed, so a passing run means the ABI
+worked end to end rather than that a mock was called.
+
+```bash
+# build the library first, then:
+gcc -O0 -o net_test  test/net_test.c  -Iinclude -Isrc \
+    build/libwasmcart.a deps/libnode/libnode.a -lstdc++ -lm -lpthread -ldl
+
+node ../wasmcart/test/wsserver.mjs --port 8796 &   # from the wasmcart repo
+./net_test 8796         # require, nextTick, net.connect, WebSocket round-trip
+./rumble_test ../wasmcart/test/fixtures/rumble.wasc
+./text_test  test/textauto.wasc 5436 5440 5444 5456
+```
+
+`text_test` takes the cart's debug-field offsets as arguments because they move
+whenever the fixture is recompiled -- linking `malloc` alone shifted them 16
+bytes. Read them with wasmcart's `readDebugState()`.
+
+Two traps worth knowing before writing another one:
+
+- `wc_host_enter_v8()` must be called **after** `wc_host_create()`; create() is
+  what initialises V8. Calling it first segfaults before `main()` prints
+  anything, which reads like a host bug rather than a harness bug.
+- A static library does not relink automatically. Rebuilding `libwasmcart.a`
+  and re-running a stale test binary produces confident wrong answers.
 
 ### GL Import Bridge (gl_imports.cpp)
 
