@@ -1015,8 +1015,7 @@ extern "C" int wc_test_eval_flag(const char* code, const char* flag, int iters) 
         pump_node(NULL);
         v8::Local<v8::Value> v;
         if (ctx()->Global()->Get(ctx(), v8str(flag)).ToLocal(&v) && v->IsTrue()) return 1;
-        struct timespec t = {0, 10 * 1000 * 1000};
-        nanosleep(&t, NULL);
+        uv_sleep(10);  // uv, not nanosleep: this builds on Windows too
     }
     return 0;
 }
