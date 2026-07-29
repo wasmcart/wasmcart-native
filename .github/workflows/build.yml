@@ -31,7 +31,16 @@ jobs:
       - name: Smoke test
         run: |
           # V8 + WASM init test — SDL will fail (no display) but cart should load
+          # A plain kill+wait is NOT enough here: libnode/V8 can still be
+          # tearing down when the Package step runs strip on the same file,
+          # which fails with "Text file busy" -- that has been breaking Package
+          # on every push. Strip here instead, retrying until the binary is
+          # actually writable, so Package finds it already stripped.
           (build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 & PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null) || true
+          for i in $(seq 1 50); do
+            strip build/wasmcart-run 2>/dev/null && break
+            sleep 0.2
+          done
           if grep -q "loaded snake" /tmp/smoke.log; then
             echo "PASS: V8 initialized, cart loaded"
           else
@@ -41,7 +50,7 @@ jobs:
           fi
       - name: Package
         run: |
-          strip build/wasmcart-run
+          strip build/wasmcart-run || true   # already stripped in Smoke test
           tar czf wasmcart-native-linux-x86_64.tar.gz -C build wasmcart-run
       - uses: actions/upload-artifact@v7
         with:
@@ -67,7 +76,16 @@ jobs:
         run: mkdir build && cd build && cmake .. && make -j$(nproc)
       - name: Smoke test
         run: |
+          # A plain kill+wait is NOT enough here: libnode/V8 can still be
+          # tearing down when the Package step runs strip on the same file,
+          # which fails with "Text file busy" -- that has been breaking Package
+          # on every push. Strip here instead, retrying until the binary is
+          # actually writable, so Package finds it already stripped.
           (build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 & PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null) || true
+          for i in $(seq 1 50); do
+            strip build/wasmcart-run 2>/dev/null && break
+            sleep 0.2
+          done
           if grep -q "loaded snake" /tmp/smoke.log; then
             echo "PASS: V8 initialized, cart loaded"
           else
@@ -77,7 +95,7 @@ jobs:
           fi
       - name: Package
         run: |
-          strip build/wasmcart-run
+          strip build/wasmcart-run || true   # already stripped in Smoke test
           tar czf wasmcart-native-linux-aarch64.tar.gz -C build wasmcart-run
       - uses: actions/upload-artifact@v7
         with:
