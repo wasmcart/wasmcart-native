@@ -36,7 +36,22 @@ jobs:
           # which fails with "Text file busy" -- that has been breaking Package
           # on every push. Strip here instead, retrying until the binary is
           # actually writable, so Package finds it already stripped.
-          (build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 & PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null) || true
+          # POLL for the success line instead of sleeping a fixed 3s. V8 init on
+          # a loaded aarch64 runner can exceed 3s, which made this fail on a
+          # commit that had passed minutes earlier -- a flake, not a regression.
+          # Waiting up to 60s costs nothing when the cart loads in ~1s.
+          build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 &
+          PID=$!
+          for i in $(seq 1 300); do
+            grep -q "loaded snake" /tmp/smoke.log && break
+            kill -0 $PID 2>/dev/null || break   # process died; stop waiting
+            sleep 0.2
+          done
+          kill $PID 2>/dev/null
+          wait $PID 2>/dev/null || true
+          # Strip here, retrying until the binary is writable: libnode/V8 can
+          # still be unmapping when Package would otherwise strip it, which
+          # fails with "Text file busy".
           for i in $(seq 1 50); do
             strip build/wasmcart-run 2>/dev/null && break
             sleep 0.2
@@ -81,7 +96,22 @@ jobs:
           # which fails with "Text file busy" -- that has been breaking Package
           # on every push. Strip here instead, retrying until the binary is
           # actually writable, so Package finds it already stripped.
-          (build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 & PID=$!; sleep 3; kill $PID 2>/dev/null; wait $PID 2>/dev/null) || true
+          # POLL for the success line instead of sleeping a fixed 3s. V8 init on
+          # a loaded aarch64 runner can exceed 3s, which made this fail on a
+          # commit that had passed minutes earlier -- a flake, not a regression.
+          # Waiting up to 60s costs nothing when the cart loads in ~1s.
+          build/wasmcart-run test/snake.wasc > /tmp/smoke.log 2>&1 &
+          PID=$!
+          for i in $(seq 1 300); do
+            grep -q "loaded snake" /tmp/smoke.log && break
+            kill -0 $PID 2>/dev/null || break   # process died; stop waiting
+            sleep 0.2
+          done
+          kill $PID 2>/dev/null
+          wait $PID 2>/dev/null || true
+          # Strip here, retrying until the binary is writable: libnode/V8 can
+          # still be unmapping when Package would otherwise strip it, which
+          # fails with "Text file busy".
           for i in $(seq 1 50); do
             strip build/wasmcart-run 2>/dev/null && break
             sleep 0.2
