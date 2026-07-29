@@ -120,7 +120,9 @@ static int v8_init() {
         v8::Isolate::Scope isolate_scope(g_isolate);
         v8::HandleScope handle_scope(g_isolate);
         v8::Context::Scope context_scope(ctx());
-        node::LoadEnvironment(g_env, "");
+        // A real main script, not "": node's networking is reached through the
+        // module system, and an empty one leaves `require` undefined.
+        node::LoadEnvironment(g_env, "globalThis.__wc_require = require;");
         uv_run(g_setup->event_loop(), UV_RUN_NOWAIT);
     }
 
@@ -961,6 +963,71 @@ static void deliver_text(wc_host_t* host) {
     host->text_queue_len = 0;
 }
 
+// Drive node's event loop for one slice.
+//
+// Three things have to happen, and missing any one of them breaks a different
+// subset of node in ways that look nothing like each other:
+//
+//   node::CallbackScope  drains the process.nextTick queue on scope exit.
+//     Without it nextTick NEVER runs. That is the one that cost the most to
+//     find: net.Socket.connect() defers its dial through nextTick, so a socket
+//     sat in `connecting` forever, no error, no close, and strace showed the
+//     process never made a single network syscall. Timers, setImmediate,
+//     microtasks, fs callbacks and even dns.lookup all worked, and the raw
+//     tcp_wrap binding connected fine -- so everything pointed away from the
+//     actual cause.
+//   uv_run               advances libuv: timers, sockets, threadpool results.
+//   PerformMicrotaskCheckpoint  settles promises (undici is promise-heavy).
+//
+// Called every frame, so a cart's networking progresses at frame cadence.
+static void pump_node(wc_host_t* host) {
+    (void)host;
+    {
+        node::CallbackScope scope(g_env, v8::Object::New(g_isolate), {0, 0});
+    }
+    uv_run(g_setup->event_loop(), UV_RUN_NOWAIT);
+    g_isolate->PerformMicrotaskCheckpoint();
+}
+
+/* Test hook: run `code`, then pump until globalThis[flag] is true.
+ * Exported for test/net_test.c; not part of the public header. */
+extern "C" int wc_test_eval_flag(const char* code, const char* flag, int iters) {
+    v8::HandleScope hs(g_isolate);
+    v8::Context::Scope cs(ctx());
+    v8::Local<v8::Script> sc;
+    if (!v8::Script::Compile(ctx(), v8str(code)).ToLocal(&sc)) return -1;
+    {
+        // Deliberately NOT a node::CallbackScope. One here would drain the
+        // nextTick queue itself, which is enough to complete a fast local
+        // connection -- so the test would pass even with the scope removed
+        // from pump_node(), i.e. it would not test the fix at all. Every
+        // nextTick drain has to come from the pump.
+        v8::TryCatch tc(g_isolate);
+        if (sc->Run(ctx()).IsEmpty()) {
+            if (tc.HasCaught()) {
+                v8::String::Utf8Value e(g_isolate, tc.Exception());
+                wc_log("test eval threw: %s\n", *e);
+            }
+            return -2;
+        }
+    }
+    for (int i = 0; i < iters; i++) {
+        pump_node(NULL);
+        v8::Local<v8::Value> v;
+        if (ctx()->Global()->Get(ctx(), v8str(flag)).ToLocal(&v) && v->IsTrue()) return 1;
+        struct timespec t = {0, 10 * 1000 * 1000};
+        nanosleep(&t, NULL);
+    }
+    return 0;
+}
+
+extern "C" void wc_host_pump(wc_host_t* host) {
+    if (!host) return;
+    v8::HandleScope hs(g_isolate);
+    v8::Context::Scope cs(ctx());
+    pump_node(host);
+}
+
 extern "C" void wc_host_run_frame(wc_host_t* host) {
     if (!host->fn_wc_render || host->trapped) return;
 
@@ -971,6 +1038,7 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     auto state = (v8_host_state*)host->v8_state;
     v8::TryCatch try_catch(g_isolate);
 
+    pump_node(host);     // let node's async work progress before the frame
     deliver_text(host);  // before render, like every other input
 
     auto result = state->fn_wc_render.Get(g_isolate)->Call(

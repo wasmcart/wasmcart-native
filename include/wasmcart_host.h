@@ -187,6 +187,11 @@ void wc_host_set_keyboard(wc_host_t* host, const uint8_t keys[WC_KEYS_STATE_SIZE
 void wc_host_set_pointer(wc_host_t* host, int index, int16_t x, int16_t y, uint8_t buttons, uint8_t active);
 void wc_host_set_time(wc_host_t* host, double time_ms, double delta_ms, uint32_t frame);
 
+// Advance node's event loop without running a frame. wc_host_run_frame() does
+// this for you; call it directly only when driving async work outside the
+// frame loop (waiting on a connection before the cart starts, say).
+void wc_host_pump(wc_host_t* host);
+
 // Run one frame — calls wc_render() on the cart
 void wc_host_run_frame(wc_host_t* host);
 
