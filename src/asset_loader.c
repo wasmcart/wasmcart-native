@@ -223,6 +223,33 @@ int wc_parse_manifest(wc_host_t* host, const char* json, size_t len) {
     item = cJSON_GetObjectItem(root, "keyboard");
     host->manifest.keyboard = cJSON_IsTrue(item);
 
+    cJSON* controls = cJSON_GetObjectItem(root, "controls");
+    if (cJSON_IsArray(controls)) {
+        // Presentation hint (SPEC: Manifest > Fields). Unknown tokens are
+        // ignored by rule, so new tokens never break old hosts.
+        static const struct { const char* token; uint32_t bit; } ctrl_map[] = {
+            {"dpad", WC_CTRL_DPAD}, {"a", WC_CTRL_A}, {"b", WC_CTRL_B},
+            {"x", WC_CTRL_X}, {"y", WC_CTRL_Y}, {"l", WC_CTRL_L},
+            {"r", WC_CTRL_R}, {"start", WC_CTRL_START},
+            {"select", WC_CTRL_SELECT}, {"left_stick", WC_CTRL_LSTICK},
+            {"right_stick", WC_CTRL_RSTICK}, {"left_trigger", WC_CTRL_LTRIG},
+            {"right_trigger", WC_CTRL_RTRIG}, {"l3", WC_CTRL_L3},
+            {"r3", WC_CTRL_R3},
+        };
+        host->manifest.controls = 0;
+        host->manifest.controls_set = true;
+        cJSON* tok;
+        cJSON_ArrayForEach(tok, controls) {
+            if (!cJSON_IsString(tok)) continue;
+            for (size_t i = 0; i < sizeof(ctrl_map) / sizeof(ctrl_map[0]); i++) {
+                if (strcmp(tok->valuestring, ctrl_map[i].token) == 0) {
+                    host->manifest.controls |= ctrl_map[i].bit;
+                    break;
+                }
+            }
+        }
+    }
+
     cJSON* net = cJSON_GetObjectItem(root, "net");
     if (cJSON_IsObject(net)) {
         // The presence of `net` at all is half the gate: wc_peer_open refuses

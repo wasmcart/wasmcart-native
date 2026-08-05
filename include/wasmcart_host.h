@@ -91,6 +91,32 @@ typedef struct {
 #define WC_GPU_API_WEBGPU  2
 #define WC_GPU_API_VULKAN  3
 
+// Manifest `controls` presentation hint (SPEC.md, Manifest > Fields): which
+// parts of the standard pad the game actually reads. Advisory only — every
+// button and axis is always delivered regardless. Hosts drawing on-screen
+// touch controls use it to show only what the game needs.
+#define WC_CTRL_DPAD    (1u << 0)
+#define WC_CTRL_A       (1u << 1)
+#define WC_CTRL_B       (1u << 2)
+#define WC_CTRL_X       (1u << 3)
+#define WC_CTRL_Y       (1u << 4)
+#define WC_CTRL_L       (1u << 5)
+#define WC_CTRL_R       (1u << 6)
+#define WC_CTRL_START   (1u << 7)
+#define WC_CTRL_SELECT  (1u << 8)
+#define WC_CTRL_LSTICK  (1u << 9)
+#define WC_CTRL_RSTICK  (1u << 10)
+#define WC_CTRL_LTRIG   (1u << 11)
+#define WC_CTRL_RTRIG   (1u << 12)
+#define WC_CTRL_L3      (1u << 13)
+#define WC_CTRL_R3      (1u << 14)
+
+// The retro default set hosts SHOULD assume when the manifest omits the field
+// (sticks and triggers only appear when declared).
+#define WC_CTRL_DEFAULT_SET (WC_CTRL_DPAD | WC_CTRL_A | WC_CTRL_B | \
+                             WC_CTRL_X | WC_CTRL_Y | WC_CTRL_START | \
+                             WC_CTRL_SELECT | WC_CTRL_L | WC_CTRL_R)
+
 // Parsed from manifest.json
 typedef struct {
     char     name[256];
@@ -100,6 +126,8 @@ typedef struct {
     uint32_t players;
     bool     pointer;
     bool     keyboard;
+    uint32_t controls;       // WC_CTRL_* bitmask; valid only if controls_set
+    bool     controls_set;   // manifest had a `controls` array
     // networking (v3)
     bool     websocket;
     bool     data_channel;
