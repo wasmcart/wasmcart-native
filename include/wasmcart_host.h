@@ -117,6 +117,12 @@ typedef struct {
     const uint8_t* save_data;
     uint32_t save_data_size;
     bool     defer_init;        // if true, skip _initialize/wc_init — call wc_host_finish_init() later
+    // RNG seeding. A normal load (rng_seed_set == false) rolls fresh entropy
+    // for the cart's wc_set_seed export, so every boot shuffles differently.
+    // Set rng_seed_set for deterministic replay: the cart is seeded with
+    // rng_seed exactly, same as the JS hosts' deterministic:{seed}.
+    uint32_t rng_seed;
+    bool     rng_seed_set;
 } wc_host_options_t;
 
 // ─── Host API ──────────────────────────────────────────────────────────────

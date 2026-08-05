@@ -26,6 +26,7 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <random>
 #include "wc_log.h"
 extern "C" FILE* _wc_log_file = NULL;
 extern "C" long _wc_log_bytes = 0;
@@ -50,6 +51,7 @@ struct v8_host_state {
     v8::Global<v8::Function> fn_wc_render;
     v8::Global<v8::Function> fn_initialize;
     v8::Global<v8::Function> fn_malloc;
+    v8::Global<v8::Function> fn_wc_set_seed;
     v8::Global<v8::Object> memory_obj;   // WebAssembly.Memory
 };
 
@@ -71,6 +73,26 @@ static void refresh_memory(wc_host_t* host) {
     auto ab = wasm_mem->Buffer();
     host->memory = (uint8_t*)ab->Data();
     host->memory_size = (uint32_t)ab->ByteLength();
+}
+
+// Seed the cart's RNG before wc_init. Without this every boot runs the cart's
+// compile-time seed: same shuffle, same waves, same dice (the JS hosts had the
+// identical bug). Entropy by default; opts.rng_seed_set pins it for replay.
+// Caller must hold the usual V8 scopes.
+static void seed_cart_rng(wc_host_t* host, const wc_host_options_t* opts) {
+    auto state = (v8_host_state*)host->v8_state;
+    if (state->fn_wc_set_seed.IsEmpty()) return;
+    uint32_t seed;
+    if (opts && opts->rng_seed_set) {
+        seed = opts->rng_seed;
+    } else {
+        std::random_device rd;
+        seed = (uint32_t)rd();
+    }
+    v8::Local<v8::Value> args[] = { v8::Integer::NewFromUnsigned(g_isolate, seed) };
+    (void)state->fn_wc_set_seed.Get(g_isolate)->Call(ctx(), ctx()->Global(), 1, args);
+    wc_log("wasmcart: wc_set_seed(%u)%s\n", seed,
+        (opts && opts->rng_seed_set) ? " (pinned)" : "");
 }
 
 // ─── V8 initialization (once per process) ──────────────────────────────
@@ -914,6 +936,7 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     auto fn_render = get_fn("wc_render");
     auto fn_initialize = get_fn("_initialize");
     auto fn_malloc = get_fn("malloc");
+    auto fn_set_seed = get_fn("wc_set_seed");
 
     if (fn_get_info.IsEmpty() || fn_render.IsEmpty()) {
         wc_log( "wasmcart: missing required exports (wc_get_info, wc_render)\n");
@@ -925,6 +948,7 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     if (!fn_init.IsEmpty()) state->fn_wc_init.Reset(g_isolate, fn_init);
     if (!fn_initialize.IsEmpty()) state->fn_initialize.Reset(g_isolate, fn_initialize);
     if (!fn_malloc.IsEmpty()) state->fn_malloc.Reset(g_isolate, fn_malloc);
+    if (!fn_set_seed.IsEmpty()) state->fn_wc_set_seed.Reset(g_isolate, fn_set_seed);
 
     // Store fn pointers for gl_imports to use
     host->fn_wc_get_info = &state->fn_wc_get_info;
@@ -990,6 +1014,8 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
                 opts->save_data_size : host->info.save_size;
             memcpy(host->memory + host->info.save_ptr, opts->save_data, copy_size);
         }
+
+        seed_cart_rng(host, opts);
 
         if (!fn_init.IsEmpty()) {
             auto result = fn_init->Call(ctx(), ctx()->Global(), 0, nullptr);
@@ -1068,6 +1094,8 @@ extern "C" int wc_host_finish_init(wc_host_t* host) {
 
     // Write host info (preferred dimensions, etc.) before wc_init
     write_host_info(host, &host->deferred_opts);
+
+    seed_cart_rng(host, &host->deferred_opts);
 
     // Call wc_init
     if (!state->fn_wc_init.IsEmpty()) {
