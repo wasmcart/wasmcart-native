@@ -94,10 +94,10 @@ Building from source is unaffected; the linker sets the bit.
 The ZIP reader is [miniz](https://github.com/richgel999/miniz) and manifest parsing
 uses [cJSON](https://github.com/DaveGamble/cJSON), both vendored under `deps/`.
 
-This same host core is shared with
-[wasmcart-libretro](https://github.com/wasmcart/wasmcart-libretro) via git submodule,
-so the GL bridge and asset loader stay in lockstep between the standalone player and
-the RetroArch core.
+This same host core is shared via git submodule with
+[wasmcart-libretro](https://github.com/wasmcart/wasmcart-libretro) and with the
+standalone Android player, so the GL bridge, asset loader, and ABI handling
+stay in lockstep across all three embeddings.
 
 ## Architecture
 
@@ -109,7 +109,7 @@ wasmcart-run (75MB, statically linked)
 ├── EGL + GLES3              — GL context for GPU carts
 │
 ├── cart_host.cpp             — wasmcart ABI: load .wasc, manage V8, run frames
-├── gl_imports.cpp            — 160 GL functions registered as V8 callbacks
+├── gl_imports.cpp            — ~209 GL functions registered as V8 callbacks
 ├── asset_loader.c            — .wasc ZIP reading (miniz) + manifest parsing (cJSON)
 ├── egl_context.c             — EGL pbuffer + window surface management
 └── main.c                    — SDL2 event loop, input, display, audio queue
@@ -137,6 +137,20 @@ cart can drive a d-pad character picker while a field is open.
 The keyboard-as-gamepad fallback is not conditional on whether a controller is
 plugged in. Making it so would mean unplugging a pad mid-game silently changed
 what the keys did.
+
+## RNG Seeding
+
+A normal load seeds the cart's `wc_set_seed` export (if it has one) with fresh
+entropy, so every boot deals a different shuffle. Embedders pin it for
+deterministic replay via `wc_host_options_t`:
+
+```c
+wc_host_options_t opts = { .rng_seed = 1234, .rng_seed_set = true };
+```
+
+This mirrors the JS hosts' `deterministic:{seed}` exactly: unpinned differs
+every run, pinned reproduces bit-for-bit. `test/seed_test.c` asserts both
+directions against the `detrng` fixture.
 
 ## Resolution
 
@@ -212,6 +226,7 @@ node ../wasmcart/test/wsserver.mjs --port 8796 &   # from the wasmcart repo
 ./text_test  test/textauto.wasc 5436 5440 5444 5456
 sh test/input_guard_test.sh   # keyboard is not also a gamepad while typing
 ./peer_test 8796 <granted.wasc> <ungranted.wasc>   # wc_peer_* end to end
+./seed_test ../wasmcart/test/fixtures/detrng.wasc  # entropy differs, pinned reproduces
 ```
 
 `text_test` takes the cart's debug-field offsets as arguments because they move
@@ -228,7 +243,8 @@ Two traps worth knowing before writing another one:
 
 ### GL Import Bridge (gl_imports.cpp)
 
-~190 GLES3 functions registered as V8 FunctionCallbacks. Key non-obvious behaviors:
+~209 GLES3 functions registered as V8 FunctionCallbacks (the count is logged
+at startup: `GL imports registered (N functions, ...)`). Key non-obvious behaviors:
 
 **FBO Redirect**: All `glBindFramebuffer(GL_FRAMEBUFFER, 0)` calls are intercepted and redirected to a capture FBO. This lets the host blit the cart's output to the screen with letterboxing. `glClear` on the redirect FBO is suppressed after a cart blit to prevent wiping captured content.
 
