@@ -82,7 +82,14 @@ endif()
 
 # ─── wasmcart-run (standalone player) ───────────────────────────────────
 
-add_executable(wasmcart-run src/main.c src/egl_context.c)
+if(APPLE)
+    # mac_layer.m: NSWindow->CALayer resolution + CAMetalLayer vsync/scale
+    # for ANGLE's Metal backend (see src/mac_layer.h).
+    add_executable(wasmcart-run src/main.c src/egl_context.c src/mac_layer.m)
+    target_link_libraries(wasmcart-run PUBLIC "-framework Cocoa" "-framework QuartzCore")
+else()
+    add_executable(wasmcart-run src/main.c src/egl_context.c)
+endif()
 target_link_libraries(wasmcart-run PRIVATE wasmcart)
 
 # SDL2 — prefer static linking for single-binary distribution

@@ -207,10 +207,15 @@ static void parse_cart_info(wc_host_t* host, uint32_t info_ptr) {
     info->keys_ptr         = wc_read_u32(mem, info_ptr + WC_INFO_KEYS_PTR);
     info->gpu_api          = wc_read_u32(mem, info_ptr + WC_INFO_GPU_API);
 
-    // Determine rendering mode: gpu_api is authoritative, fall back to fb_ptr for old carts
+    // Determine rendering mode: gpu_api is authoritative when set. For old
+    // carts built before the field existed (gpu_api == 0), fall back to
+    // fb_ptr — but never DOWNGRADE a cart the import pre-scan already proved
+    // is GL: a hybrid cart (gl imports + fb fallback surface) was being
+    // forced onto the 2D path here, which presents its fallback framebuffer
+    // and silently never runs its GL renderer.
     if (info->gpu_api > 0) {
         host->uses_gl = true;
-    } else {
+    } else if (!host->uses_gl) {
         host->uses_gl = (info->fb_ptr == 0);
     }
 }

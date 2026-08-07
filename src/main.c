@@ -281,13 +281,21 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "wasmcart: using X11 EGL window surface\n");
                 egl_create_window_surface((void*)(uintptr_t)wm_info.info.x11.window);
 #endif
+            } else if (wm_info.subsystem == SDL_SYSWM_COCOA) {
+#ifdef SDL_VIDEO_DRIVER_COCOA
+                // NSWindow*; egl_create_window_surface resolves it to the
+                // contentView's CALayer for ANGLE's Metal backend.
+                fprintf(stderr, "wasmcart: using Cocoa EGL window surface\n");
+                egl_create_window_surface((void*)wm_info.info.cocoa.window);
+#endif
             }
             egl_make_current();
-            if (uncapped) {
-                extern void* egl_get_display(void);
-                EGLBoolean ok = eglSwapInterval((EGLDisplay)egl_get_display(), 0);
-                fprintf(stderr, "wasmcart: eglSwapInterval(0) = %s\n", ok ? "OK" : "FAILED");
-            }
+            /* Vsync unless uncapped: unsynced timer-paced presents land at
+             * random phases of the refresh — microstutter at a nominally
+             * perfect frame rate. egl_set_swap_interval also handles the
+             * macOS Metal path, where eglSwapInterval alone is a no-op. */
+            egl_set_swap_interval(uncapped ? 0 : 1);
+            fprintf(stderr, "wasmcart: swap interval %d\n", uncapped ? 0 : 1);
             // Set up FBO redirect for GL carts
             {
                 extern void wc_gl_setup_redirect(uint32_t width, uint32_t height);

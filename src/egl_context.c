@@ -5,14 +5,57 @@
 #include <GLES3/gl3.h>
 #include <stdio.h>
 
+#ifdef __APPLE__
+#include "mac_layer.h"
+#ifndef EGL_PLATFORM_ANGLE_ANGLE
+#define EGL_PLATFORM_ANGLE_ANGLE 0x3202
+#define EGL_PLATFORM_ANGLE_TYPE_ANGLE 0x3203
+#endif
+#ifndef EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE
+#define EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE 0x3489
+#endif
+typedef EGLDisplay (*PFNEGLGETPLATFORMDISPLAYEXTPROC_WC)(EGLenum, void*, const EGLint*);
+#endif
+
 static EGLDisplay egl_display = EGL_NO_DISPLAY;
 static EGLContext egl_context = EGL_NO_CONTEXT;
 static EGLSurface egl_surface = EGL_NO_SURFACE;
 static EGLConfig egl_config;
 static bool initialized = false;
 
+#ifdef __APPLE__
+/* The original SDL handle and its resolved CALayer, plus deferred vsync:
+ * ANGLE's Metal backend accepts eglSwapInterval but never syncs — the real
+ * switch is CAMetalLayer.displaySyncEnabled, and that layer only exists
+ * after ANGLE's first present, so the interval is applied lazily from
+ * egl_swap_buffers. */
+static void* mac_native_window = NULL;
+static void* mac_layer = NULL;
+static int mac_desired_sync = -1;
+static bool mac_sync_applied = true;
+#endif
+
 int egl_create_context(uint32_t width, uint32_t height) {
+#ifdef __APPLE__
+    /* Prefer ANGLE's Metal backend. The default display resolves to the
+     * deprecated CGL backend, whose swap layer free-runs — eglSwapInterval
+     * is a no-op there, so window presents can never sync to the display.
+     * Falls through to the default display on builds without Metal. */
+    PFNEGLGETPLATFORMDISPLAYEXTPROC_WC get_platform_display =
+        (PFNEGLGETPLATFORMDISPLAYEXTPROC_WC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+    if (get_platform_display) {
+        const EGLint attribs[] = {
+            EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
+            EGL_NONE
+        };
+        egl_display = get_platform_display(EGL_PLATFORM_ANGLE_ANGLE,
+            (void*)EGL_DEFAULT_DISPLAY, attribs);
+    }
+    if (egl_display == EGL_NO_DISPLAY)
+        egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+#else
     egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+#endif
     if (egl_display == EGL_NO_DISPLAY) {
         fprintf(stderr, "wasmcart: eglGetDisplay failed\n");
         return -1;
@@ -85,6 +128,18 @@ int egl_create_context(uint32_t width, uint32_t height) {
 int egl_create_window_surface(void* native_window) {
     if (!initialized) return -1;
 
+#ifdef __APPLE__
+    /* SDL hands over an NSWindow*; ANGLE validates a CALayer*. Resolve it
+     * (and remember both, for per-swap scale re-sync). */
+    mac_native_window = native_window;
+    native_window = wc_mac_layer_for_native_window(native_window);
+    if (!native_window) {
+        fprintf(stderr, "wasmcart: macOS native window is not an NSWindow/NSView/CALayer\n");
+        return -1;
+    }
+    mac_layer = native_window;
+#endif
+
     // Destroy the pbuffer surface
     if (egl_surface != EGL_NO_SURFACE) {
         eglDestroySurface(egl_display, egl_surface);
@@ -110,11 +165,42 @@ void egl_make_current(void) {
 void egl_swap_buffers(void) {
     if (initialized) {
         eglSwapBuffers(egl_display, egl_surface);
+#ifdef __APPLE__
+        if (mac_layer) {
+            /* Cross-monitor drags change the backing scale under us. */
+            wc_mac_sync_backing_scale(mac_native_window, mac_layer);
+            /* ANGLE creates its CAMetalLayer on the first present; a swap
+             * interval requested before then had nothing to apply to. */
+            if (!mac_sync_applied) {
+                mac_sync_applied = wc_mac_set_display_sync(mac_layer, mac_desired_sync >= 1);
+            }
+        }
+#endif
     }
+}
+
+void egl_set_swap_interval(int interval) {
+    if (!initialized) return;
+    eglSwapInterval(egl_display, interval);
+#ifdef __APPLE__
+    /* ANGLE Metal ignores eglSwapInterval; displaySyncEnabled is the real
+     * switch. Apply now if ANGLE already made its layer, else let
+     * egl_swap_buffers retry once it exists. */
+    if (mac_layer) {
+        mac_desired_sync = interval;
+        mac_sync_applied = wc_mac_set_display_sync(mac_layer, interval >= 1);
+    }
+#endif
 }
 
 void egl_destroy(void) {
     if (!initialized) return;
+#ifdef __APPLE__
+    mac_native_window = NULL;
+    mac_layer = NULL;
+    mac_desired_sync = -1;
+    mac_sync_applied = true;
+#endif
     eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     if (egl_surface != EGL_NO_SURFACE) eglDestroySurface(egl_display, egl_surface);
     if (egl_context != EGL_NO_CONTEXT) eglDestroyContext(egl_display, egl_context);
