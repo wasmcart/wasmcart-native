@@ -707,23 +707,37 @@ GL_REG(glGenFramebuffers, 2, 0, {
 GL_REG(glDeleteFramebuffers, 2, 0, glDeleteFramebuffers(A_I32(0), (const GLuint*)wptr(A_U32(1))))
 // FBO redirect: capture what the cart renders to FBO 0
 
+static GLuint _redirect_rbo = 0;
+
 static void _ensure_redirect_fbo(uint32_t w, uint32_t h) {
     if (_redirect_fbo && _redirect_w == w && _redirect_h == h) return;
-    if (_redirect_fbo) { glDeleteFramebuffers(1, &_redirect_fbo); glDeleteTextures(1, &_redirect_tex); }
-    glGenFramebuffers(1, &_redirect_fbo);
-    glGenTextures(1, &_redirect_tex);
+    // NEVER delete + re-gen these on resize. The cart allocates GL names
+    // through the same context; a delete here lets the driver hand the
+    // recycled name to the cart's next glGen — or vice versa. Seen for real
+    // on Mali-G715: the re-genned redirect texture came back with the SAME
+    // name as the cart's live sprite atlas, so every frame rendered INTO
+    // the atlas and every sprite sampled the frame instead of its art.
+    // Allocate the names once and re-spec their storage in place.
+    if (!_redirect_fbo) {
+        glGenFramebuffers(1, &_redirect_fbo);
+        glGenTextures(1, &_redirect_tex);
+        glGenRenderbuffers(1, &_redirect_rbo);
+    }
+    // Don't leak the resize into cart-visible state: engines cache their
+    // texture binding and skip redundant glBindTexture calls.
+    GLint prevTex = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
     glBindTexture(GL_TEXTURE_2D, _redirect_tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
     glBindFramebuffer(GL_FRAMEBUFFER, _redirect_fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, _redirect_tex, 0);
     // Also need depth/stencil for 3D rendering
-    GLuint rbo;
-    glGenRenderbuffers(1, &rbo);
-    glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, _redirect_rbo);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, _redirect_rbo);
     _redirect_w = w; _redirect_h = h;
     // Create cart VAO to isolate cart's vertex attrib state from host
     if (!_cart_vao) {
@@ -1090,23 +1104,30 @@ extern "C" void wc_gl_set_redirect_fbo(uint32_t fbo, uint32_t width, uint32_t he
     _last_draw_fbo = fbo;
 }
 
+// Resolve all GL entry points from the host's loader, once, from whichever
+// site first has a loader available. The host (libretro core or native) sets
+// host->gl_loader; for the core that is RetroArch's get_proc_address (not
+// available until context_reset), while the standalone hosts set it before
+// wc_host_load_file. Every _cb_gl* shim jumps through these pointers with no
+// null check, so they MUST be resolved before any cart code can call GL — a
+// cart that touches GL during _initialize (love.load building canvases)
+// otherwise jumps to 0 and takes the process down.
+static int s_gl_procs_loaded = 0;
+static void _load_gl_procs_once(void) {
+    if (s_gl_procs_loaded || !_host || !_host->gl_loader) return;
+    wc_gl_procs_load((void*)_host->gl_loader);
+    s_gl_procs_loaded = 1;
+    if (!p_glGenFramebuffers)
+        wc_log("wasmcart: WARNING host gl_loader returned no glGenFramebuffers\n");
+}
+
 extern "C" void wc_gl_setup_redirect(uint32_t width, uint32_t height) {
-    // Resolve all GL entry points from the host's loader before any GL call.
-    // The host (libretro core or native) sets host->gl_loader; for the core that
-    // is RetroArch's get_proc_address. Runs on context_reset, before the FBO ops.
-    static int s_gl_loaded = 0;
-    if (!s_gl_loaded && _host && _host->gl_loader) {
-        wc_gl_procs_load((void*)_host->gl_loader);
-        s_gl_loaded = 1;
-        if (!p_glGenFramebuffers)
-            wc_log("wasmcart: WARNING host gl_loader returned no glGenFramebuffers\n");
-    }
+    _load_gl_procs_once();
     _ensure_redirect_fbo(width, height);
 }
 
 extern "C" void wc_gl_blit_to_screen(uint32_t cart_w, uint32_t cart_h, uint32_t win_w, uint32_t win_h) {
     if (!_redirect_fbo) return;
-
     // Use the cart's actual blit size if available (e.g. Godot renders 640x360 into 640x480 FBO)
     uint32_t src_w = _cart_blit_w ? _cart_blit_w : cart_w;
     uint32_t src_h = _cart_blit_h ? _cart_blit_h : cart_h;
@@ -1134,11 +1155,18 @@ extern "C" void wc_gl_blit_to_screen(uint32_t cart_w, uint32_t cart_h, uint32_t 
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);  // real FBO 0 = EGL surface
     glDisable(GL_SCISSOR_TEST);
     glViewport(0, 0, win_w, win_h);
+    // The letterbox clear must not leak into cart-visible GL state: engines
+    // cache glClearColor across frames (wasmcart-lua r2d only re-sets it when
+    // the cart's background CHANGES), so leaving black here turns every
+    // subsequent cart clear black. Save and restore around our clear.
+    GLfloat cart_clear[4];
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, cart_clear);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     glBlitFramebuffer(0, 0, src_w, src_h,
         dst_x, dst_y, dst_x + dst_w, dst_y + dst_h,
         GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glClearColor(cart_clear[0], cart_clear[1], cart_clear[2], cart_clear[3]);
 
     // Restore redirect FBO + viewport for next frame
     glBindFramebuffer(GL_FRAMEBUFFER, _redirect_fbo);
@@ -1243,11 +1271,13 @@ extern "C" void wc_gl_build_v8_imports(v8::Isolate* isolate, v8::Local<v8::Conte
         env_obj->Set(context, name, fn).Check();
     }
 
-    // NOTE: GL procs are loaded from the frontend's get_proc_address in
-    // context_reset, which runs AFTER this (wc_gl_build_v8_imports is called from
-    // wc_host_load_file, during retro_load_game). So p_glGetString is still NULL
-    // here — calling glGetString(GL_RENDERER) unconditionally segfaults (jump to
-    // 0x0). Guard it: only report the renderer once the procs are actually loaded.
+    // Resolve procs NOW if the host already provided a loader (standalone
+    // hosts do, before wc_host_load_file) so the cart can never call an
+    // unresolved GL shim during _initialize. For the libretro core the loader
+    // doesn't exist until context_reset, so this no-ops and the
+    // wc_gl_setup_redirect call on context_reset resolves them instead —
+    // safe there because the frontend never runs the cart before that.
+    _load_gl_procs_once();
     const char* renderer = p_glGetString ? (const char*)glGetString(GL_RENDERER) : "(GL not ready)";
     wc_log( "wasmcart: GL imports registered (%d functions, %s)\n", idx, renderer);
 }
