@@ -18,6 +18,10 @@
 #include <stdbool.h>
 #include <signal.h>
 
+#if defined(SDL_VIDEO_DRIVER_WAYLAND) && defined(WC_HAVE_WAYLAND_EGL)
+#define WC_WAYLAND_EGL 1
+#endif
+
 #define MAX_CONTROLLERS 4
 
 static SDL_GameController* controllers[MAX_CONTROLLERS] = {0};
@@ -188,6 +192,187 @@ static void persist_sav(wc_host_t* host, const char* sav_path) {
     fclose(f);
 }
 
+// ─── Native Wayland ───────────────────────────────────────────────────────
+//
+// GL carts run their init inside wc_host_load_file, so a context has to be
+// current before the cart loads, and on Wayland it has to be on SDL's own
+// wl_display: Wayland objects can't cross connections, and the window will be
+// SDL's. SDL2 only hands its wl_display out through a window, so when SDL
+// picks Wayland a hidden 16x16 window comes first. Its wl_display carries the
+// EGL display and its wl_surface the boot surface that stands in for the
+// pbuffer. With any other video driver SDL video is shut down again and the
+// pbuffer path below runs exactly as before.
+#ifdef WC_WAYLAND_EGL
+static SDL_Window* boot_window = NULL;
+
+static void* wayland_boot_window(void** wl_surface) {
+    *wl_surface = NULL;
+    if (!getenv("WAYLAND_DISPLAY") && !getenv("WAYLAND_SOCKET")) return NULL;
+    if (SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) return NULL;
+    void* display = NULL;
+    const char* driver = SDL_GetCurrentVideoDriver();
+    if (driver && strcmp(driver, "wayland") == 0) {
+        boot_window = SDL_CreateWindow("", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+            16, 16, SDL_WINDOW_HIDDEN);
+        SDL_SysWMinfo wm;
+        SDL_VERSION(&wm.version);
+        if (boot_window && SDL_GetWindowWMInfo(boot_window, &wm) &&
+            wm.subsystem == SDL_SYSWM_WAYLAND) {
+            display = wm.info.wl.display;
+            *wl_surface = wm.info.wl.surface;
+        } else if (boot_window) {
+            SDL_DestroyWindow(boot_window);
+            boot_window = NULL;
+        }
+    }
+    if (!display) SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    return display;
+}
+
+// After egl_destroy() or the switch to the real window: the boot surface's
+// wl_egl_window sits on this window's wl_surface.
+static void drop_boot_window(void) {
+    if (boot_window) SDL_DestroyWindow(boot_window);
+    boot_window = NULL;
+}
+#endif
+
+// ─── KMSDRM (no compositor) ───────────────────────────────────────────────
+//
+// On SDL's KMSDRM backend the player can't put its own EGL surface on the
+// screen: SysWM exposes only the DRM fd and gbm_device, not SDL's gbm_surface,
+// and SDL does the page flips in its own GLES swap. So there SDL owns the GL
+// context (ES 3.0), and its SDL_GL_GetProcAddress is the cart's GL loader.
+// Because GL carts run their init inside wc_host_load_file, the window and
+// context have to exist before the cart loads.
+//
+// One window, for the whole run, at the console's mode. On KMSDRM a window's
+// size picks the video mode (a small boot window would switch the screen to
+// its lowest mode), and creating or destroying windows moves or unbinds SDL's
+// current context and resets the CRTC. It is never resized or made
+// fullscreen either; both rebuild SDL's surfaces.
+//
+// Opt-in with SDL_VIDEODRIVER=kmsdrm, so every other run (including headless
+// CI, which loads the cart before SDL starts) is unchanged.
+static SDL_Window* kms_window = NULL;
+static SDL_GLContext kms_ctx = NULL;
+
+// The context goes before its window: destroying the last KMSDRM window
+// unloads SDL's EGL.
+static void kms_shutdown(void) {
+    if (kms_ctx) SDL_GL_DeleteContext(kms_ctx);
+    if (kms_window) SDL_DestroyWindow(kms_window);
+    kms_ctx = NULL;
+    kms_window = NULL;
+}
+
+#ifdef __linux__
+#define WC_KMSDRM_GL 1
+
+// SDL_VIDEODRIVER may be a comma-separated list; any entry naming kmsdrm counts.
+static bool kms_requested(void) {
+    const char* list = getenv("SDL_VIDEODRIVER");
+    if (!list) list = getenv("SDL_VIDEO_DRIVER");  // SDL3's name, read by sdl2-compat
+    while (list && *list) {
+        size_t n = strcspn(list, ",");
+        if (n == 6 && SDL_strncasecmp(list, "kmsdrm", 6) == 0) return true;
+        list += n;
+        if (*list == ',') list++;
+    }
+    return false;
+}
+
+typedef const GLubyte* (*wc_get_string_fn)(GLenum);
+typedef void (*wc_rect_fn)(GLint, GLint, GLsizei, GLsizei);
+
+static bool kms_boot(void) {
+    if (!kms_requested()) return false;
+    // SDL's video init mutes the console keyboard, and only SDL_Quit (or
+    // SDL's own SIGINT/SIGTERM handler, which node's pre-empts) unmutes it.
+    // Install the player's quit handler now rather than at the main loop, so
+    // a signal while the cart loads becomes an orderly exit after the load
+    // instead of leaving the console without a keyboard.
+    signal(SIGINT, on_quit_signal);
+    signal(SIGTERM, on_quit_signal);
+    if (SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) {
+        fprintf(stderr, "wasmcart: KMSDRM GL unavailable: %s\n", SDL_GetError());
+        return false;
+    }
+    // SDL2 names it "KMSDRM". With a list like "x11,kmsdrm" SDL may have
+    // picked another driver.
+    const char* driver = SDL_GetCurrentVideoDriver();
+    if (!driver || SDL_strcasecmp(driver, "KMSDRM") != 0) {
+        fprintf(stderr, "wasmcart: SDL picked %s, not KMSDRM\n", driver ? driver : "no video driver");
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        return false;
+    }
+
+    // After video init (which resets them) and before the window, where SDL
+    // fixes the GL library and EGL config: the same ES 3.0, RGBA8, D24S8 as
+    // egl_context.c.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
+    SDL_DisplayMode dm;
+    wc_get_string_fn get_string = NULL;
+    wc_rect_fn viewport = NULL, scissor = NULL;
+    int major = 0;
+    if (SDL_GetDesktopDisplayMode(0, &dm) != 0 || dm.w <= 0 || dm.h <= 0) goto fail;
+    // Desktop size keeps the console's mode. No FULLSCREEN flag: on KMSDRM
+    // every window covers the screen anyway, and the flag rebuilds surfaces.
+    kms_window = SDL_CreateWindow("wasmcart", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+        dm.w, dm.h, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+    if (!kms_window) goto fail;
+    kms_ctx = SDL_GL_CreateContext(kms_window);  // also makes it current
+    if (!kms_ctx) goto fail;
+
+    // Through the same loader the cart gets.
+    get_string = (wc_get_string_fn)SDL_GL_GetProcAddress("glGetString");
+    viewport = (wc_rect_fn)SDL_GL_GetProcAddress("glViewport");
+    scissor = (wc_rect_fn)SDL_GL_GetProcAddress("glScissor");
+    // Insist on what was asked for: a cart must not run on an ES 2 context.
+    if (!get_string || !viewport || !scissor ||
+        sscanf((const char*)get_string(GL_VERSION), "OpenGL ES %d", &major) != 1 || major < 3) {
+        SDL_SetError("no OpenGL ES 3 context");
+        goto fail;
+    }
+    // Cart init sees the same 16x16 viewport and scissor box as the pbuffer
+    // other platforms boot on.
+    viewport(0, 0, 16, 16);
+    scissor(0, 0, 16, 16);
+    SDL_ShowCursor(SDL_DISABLE);  // nothing here forwards the mouse
+
+    SDL_version v;
+    SDL_GetVersion(&v);
+    fprintf(stderr, "wasmcart: KMSDRM GL: %s, %s, %dx%d@%dHz (SDL %d.%d.%d %s)\n",
+        get_string(GL_RENDERER), get_string(GL_VERSION), dm.w, dm.h, dm.refresh_rate,
+        v.major, v.minor, v.patch, SDL_GetRevision());
+    return true;
+
+fail:
+    fprintf(stderr, "wasmcart: KMSDRM GL unavailable: %s\n", SDL_GetError());
+    kms_shutdown();
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    return false;
+}
+#endif
+
+static void window_pixel_size(SDL_Window* window, int* w, int* h) {
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+    SDL_GetWindowSizeInPixels(window, w, h);
+#else
+    SDL_GetWindowSize(window, w, h);  // the same without SDL_WINDOW_ALLOW_HIGHDPI
+#endif
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         print_usage(argv[0]);
@@ -230,8 +415,29 @@ int main(int argc, char* argv[]) {
     }
 
     // 2. Create EGL context (BEFORE SDL window)
-    //    Always available — the cart decides whether to use GL or framebuffer
-    egl_create_context(16, 16);
+    //    Always available — the cart decides whether to use GL or framebuffer.
+    //    On native Wayland it goes on SDL's wl_display (see above).
+#ifdef WC_WAYLAND_EGL
+    void* boot_wl_surface = NULL;
+    void* sdl_wl_display = wayland_boot_window(&boot_wl_surface);
+    if (sdl_wl_display) {
+        egl_create_wayland_context(sdl_wl_display, boot_wl_surface, 16, 16);
+        if (!egl_is_initialized()) {
+            fprintf(stderr, "wasmcart: no EGL on SDL's Wayland display; "
+                            "GL carts need SDL_VIDEODRIVER=x11\n");
+            egl_destroy();
+            drop_boot_window();
+        }
+    } else
+#endif
+#ifdef WC_KMSDRM_GL
+    if (kms_boot()) {
+        wc_host_set_gl_loader(host, (wc_gl_get_proc_fn)SDL_GL_GetProcAddress);
+    } else
+#endif
+    {
+        egl_create_context(16, 16);
+    }
     if (egl_is_initialized()) {
         wc_host_set_gl_loader(host, (wc_gl_get_proc_fn)egl_get_proc_address);
     }
@@ -254,9 +460,27 @@ int main(int argc, char* argv[]) {
     int rc = wc_host_load_file(host, cart_path, &opts);
     if (rc != 0) {
         fprintf(stderr, "wasmcart: failed to load %s\n", cart_path);
+        egl_destroy();
+#ifdef WC_WAYLAND_EGL
+        drop_boot_window();
+        SDL_Quit();
+#endif
+        if (kms_window) {
+            kms_shutdown();
+            SDL_Quit();
+        }
         wc_host_destroy(host);
         free(sav_data);
         return 1;
+    }
+    if (kms_window && g_should_quit) {
+        // A quit arrived while the cart loaded (see kms_boot).
+        fprintf(stderr, "wasmcart: quit while loading\n");
+        kms_shutdown();
+        SDL_Quit();
+        wc_host_destroy(host);
+        free(sav_data);
+        return 0;
     }
 
     const wc_cart_info_t* info = wc_host_get_cart_info(host);
@@ -279,6 +503,15 @@ int main(int argc, char* argv[]) {
     // 5. Init SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
         fprintf(stderr, "wasmcart: SDL_Init failed: %s\n", SDL_GetError());
+        egl_destroy();
+#ifdef WC_WAYLAND_EGL
+        drop_boot_window();
+        SDL_Quit();
+#endif
+        if (kms_window) {
+            kms_shutdown();
+            SDL_Quit();
+        }
         wc_host_destroy(host);
         free(sav_data);
         return 1;
@@ -298,16 +531,30 @@ int main(int argc, char* argv[]) {
     uint32_t win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
     if (fullscreen) win_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     // Don't use SDL_WINDOW_OPENGL — EGL provides our GL context, not SDL
-    // SDL_WINDOW_OPENGL would make SDL create a competing GLX context
+    // SDL_WINDOW_OPENGL would make SDL create a competing GLX context, and on
+    // Wayland would make SDL wrap the window in an EGLSurface of its own.
 
     char title[300];
     snprintf(title, sizeof(title), "wasmcart - %s", manifest->name);
 
-    SDL_Window* window = SDL_CreateWindow(title,
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        win_w, win_h, win_flags);
+    SDL_Window* window;
+    if (kms_window) {
+        // The KMSDRM boot window, at the console's mode for the whole run.
+        window = kms_window;
+        SDL_SetWindowTitle(window, title);
+        fprintf(stderr, "wasmcart: KMSDRM keeps the console's mode; --res sets only "
+                        "the GL render size\n");
+    } else {
+        window = SDL_CreateWindow(title,
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            win_w, win_h, win_flags);
+    }
     if (!window) {
         fprintf(stderr, "wasmcart: SDL_CreateWindow failed: %s\n", SDL_GetError());
+        egl_destroy();
+#ifdef WC_WAYLAND_EGL
+        drop_boot_window();
+#endif
         SDL_Quit();
         wc_host_destroy(host);
         free(sav_data);
@@ -321,6 +568,19 @@ int main(int argc, char* argv[]) {
     // GL carts: keep EGL for direct GL rendering
     if (!is_gl) {
         egl_destroy();
+#ifdef WC_WAYLAND_EGL
+        drop_boot_window();
+#endif
+        if (kms_ctx) {
+            // SDL's GLES2 renderer takes this ES window as it is; the default
+            // "opengl" one would rebuild it (EGL and GBM torn down, DRM master
+            // dropped and taken again). A hinted driver turns batching off,
+            // so turn it back on. Normal priority: SDL_RENDER_DRIVER wins.
+            SDL_GL_DeleteContext(kms_ctx);
+            kms_ctx = NULL;
+            SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengles2");
+            SDL_SetHint(SDL_HINT_RENDER_BATCHING, "1");
+        }
         uint32_t render_flags = SDL_RENDERER_ACCELERATED;
         if (!uncapped) render_flags |= SDL_RENDERER_PRESENTVSYNC;
         renderer = SDL_CreateRenderer(window, -1, render_flags);
@@ -342,9 +602,27 @@ int main(int argc, char* argv[]) {
         if (SDL_GetWindowWMInfo(window, &wm_info)) {
             // Runtime check — SDL2 may use X11 or Wayland regardless of compile flags
             if (wm_info.subsystem == SDL_SYSWM_WAYLAND) {
-#ifdef SDL_VIDEO_DRIVER_WAYLAND
+#ifdef WC_WAYLAND_EGL
+                // SDL only makes a wl_egl_window for an SDL_WINDOW_OPENGL
+                // window (and then owns it), so wrap its wl_surface ourselves.
+                int pw, ph;
+                window_pixel_size(window, &pw, &ph);
+                if (egl_create_wayland_window_surface(wm_info.info.wl.surface, pw, ph) != 0) {
+                    fprintf(stderr, "wasmcart: could not create a Wayland EGL window surface for %s\n",
+                        manifest->name);
+                    egl_destroy();
+                    drop_boot_window();
+                    SDL_DestroyWindow(window);
+                    SDL_Quit();
+                    wc_host_destroy(host);
+                    free(sav_data);
+                    return 1;
+                }
                 fprintf(stderr, "wasmcart: using Wayland EGL window surface\n");
-                egl_create_window_surface((void*)wm_info.info.wl.egl_window);
+                drop_boot_window();
+#elif defined(SDL_VIDEO_DRIVER_WAYLAND)
+                fprintf(stderr, "wasmcart: built without wayland-egl; "
+                                "GL carts need SDL_VIDEODRIVER=x11 on Wayland\n");
 #endif
             } else if (wm_info.subsystem == SDL_SYSWM_X11) {
 #ifdef SDL_VIDEO_DRIVER_X11
@@ -379,10 +657,27 @@ int main(int argc, char* argv[]) {
                 actual_w, actual_h, is_gl ? "GL cart" : "2D cart",
                 uncapped ? ", uncapped" : "");
         }
+    } else if (is_gl && kms_ctx) {
+        // Set the interval explicitly: SDL's default for a new context
+        // differs between versions. The context is already current.
+        if (SDL_GL_SetSwapInterval(uncapped ? 0 : 1) != 0)
+            fprintf(stderr, "wasmcart: SDL_GL_SetSwapInterval: %s\n", SDL_GetError());
+        extern void wc_gl_setup_redirect(uint32_t width, uint32_t height);
+        uint32_t redir_w = pref_width ? pref_width : cart_w;
+        uint32_t redir_h = pref_height ? pref_height : cart_h;
+        wc_gl_setup_redirect(redir_w, redir_h);
+        int dw, dh;
+        SDL_GL_GetDrawableSize(window, &dw, &dh);
+        fprintf(stderr, "wasmcart: rendering to %dx%d via SDL's KMSDRM GL (swap interval %d)\n",
+            dw, dh, uncapped ? 0 : 1);
     }
 
-    // Set up FBO redirect at the preferred (actual rendering) resolution
-    {
+    // Set up FBO redirect at the preferred (actual rendering) resolution.
+    // Only with a live context, which by now means a GL cart: a 2D cart has
+    // already traded EGL for the SDL renderer, and when EGL failed to
+    // initialize no GL loader was ever set, so this would call through null
+    // GL pointers.
+    if (egl_is_initialized()) {
         extern void wc_gl_setup_redirect(uint32_t width, uint32_t height);
         uint32_t redir_w = pref_width ? pref_width : cart_w;
         uint32_t redir_h = pref_height ? pref_height : cart_h;
@@ -522,7 +817,9 @@ int main(int argc, char* argv[]) {
                     break;
                 case SDL_KEYDOWN:
                     if (event.key.keysym.sym == SDLK_ESCAPE) running = false;
-                    if (event.key.keysym.sym == SDLK_F11) {
+                    // Not on KMSDRM: there fullscreen rebuilds SDL's surfaces
+                    // and resets the screen for a frame, for nothing.
+                    if (event.key.keysym.sym == SDLK_F11 && !kms_window) {
                         uint32_t flags = SDL_GetWindowFlags(window);
                         SDL_SetWindowFullscreen(window,
                             (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
@@ -559,7 +856,7 @@ int main(int argc, char* argv[]) {
 
         // After first frame: cart may have resized (Godot reads host_info and reconfigures)
         // Resize redirect FBO to match actual render dimensions
-        if (frame_count == 0 && egl_is_initialized()) {
+        if (frame_count == 0 && (egl_is_initialized() || kms_ctx)) {
             const wc_cart_info_t* new_info = wc_host_get_cart_info(host);
             if (new_info->width != cart_w || new_info->height != cart_h) {
                 cart_w = new_info->width;
@@ -591,6 +888,13 @@ int main(int argc, char* argv[]) {
             // The letterbox rect and viewport are in surface PIXELS. On Retina
             // the surface is backing-scale times the window's point size, so
             // SDL_GetWindowSize would put the picture in a corner quarter.
+            // A Wayland surface also has to be told the window's new size
+            // (F11, a late fullscreen configure, a compositor resize).
+            {
+                int pw, ph;
+                window_pixel_size(window, &pw, &ph);
+                egl_resize_window_surface(pw, ph);
+            }
             int cur_w, cur_h;
             if (!egl_get_drawable_size(&cur_w, &cur_h))
                 SDL_GetWindowSize(window, &cur_w, &cur_h);
@@ -598,6 +902,15 @@ int main(int argc, char* argv[]) {
             uint32_t rh = pref_height ? pref_height : cart_h;
             wc_gl_blit_to_screen(rw, rh, (uint32_t)cur_w, (uint32_t)cur_h);
             egl_swap_buffers();
+        } else if (kms_ctx) {
+            // GL carts on KMSDRM: the same blit, SDL's swap (and page flip).
+            extern void wc_gl_blit_to_screen(uint32_t cart_w, uint32_t cart_h, uint32_t win_w, uint32_t win_h);
+            int dw, dh;
+            SDL_GL_GetDrawableSize(window, &dw, &dh);
+            uint32_t rw = pref_width ? pref_width : cart_w;
+            uint32_t rh = pref_height ? pref_height : cart_h;
+            wc_gl_blit_to_screen(rw, rh, (uint32_t)dw, (uint32_t)dh);
+            SDL_GL_SwapWindow(window);
         } else if (renderer) {
             // 2D carts: SDL accelerated renderer
             uint32_t w, h;
@@ -645,8 +958,18 @@ int main(int argc, char* argv[]) {
     if (audio_dev) SDL_CloseAudioDevice(audio_dev);
     if (fb_tex) SDL_DestroyTexture(fb_tex);
     if (renderer) SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
+    // EGL before the window: on Wayland our surface sits on SDL's wl_surface
+    // and the display on SDL's wl_display, and ANGLE likewise wants its
+    // surface released while the native window still exists.
     egl_destroy();
+    // On KMSDRM SDL's context goes before the last window (which is `window`).
+    if (kms_ctx) SDL_GL_DeleteContext(kms_ctx);
+    kms_ctx = NULL;
+    kms_window = NULL;
+    SDL_DestroyWindow(window);
+#ifdef WC_WAYLAND_EGL
+    drop_boot_window();
+#endif
     persist_sav(host, sav_path);  // before destroy: reads the cart's memory
     wc_host_destroy(host);
     free(sav_data);
