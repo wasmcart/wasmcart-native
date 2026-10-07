@@ -880,8 +880,12 @@ int main(int argc, char* argv[]) {
              * to do its own antialiasing then, and a multisampled surface
              * swapped in later would break that (three.c resolves into
              * "framebuffer 0", which a multisampled target refuses). */
+            /* Headless (no window surface) "framebuffer 0" is the small
+             * placeholder pbuffer the context was made with, not a surface
+             * of the window's size: the cart stays on the redirect, which is
+             * what --shot reads. */
             static int started_redirect = -1;
-            bool want = !no_direct && blit_ok && (uint32_t)sw == rw && (uint32_t)sh == rh;
+            bool want = !no_direct && egl_has_window_surface() && blit_ok && (uint32_t)sw == rw && (uint32_t)sh == rh;
             if (started_redirect < 0) started_redirect = !want;
             if (want && started_redirect && egl_get_samples() > 0) want = false;
             wc_gl_set_direct(want);

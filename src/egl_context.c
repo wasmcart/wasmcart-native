@@ -214,6 +214,10 @@ bool egl_get_drawable_size(int* w, int* h) {
     return true;
 }
 
+bool egl_has_window_surface(void) {
+    return initialized && window_surface;
+}
+
 void egl_make_current(void) {
     if (initialized) {
         eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context);

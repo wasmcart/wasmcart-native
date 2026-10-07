@@ -23,6 +23,8 @@ int egl_create_window_surface(void* native_window);
 // SDL_GetWindowSize, which reports points. False if there is no window
 // surface yet.
 bool egl_get_drawable_size(int* w, int* h);
+/* true once the context draws to a window surface; false headless (a pbuffer) */
+bool egl_has_window_surface(void);
 
 // Make the EGL context current (call after SDL init to re-assert).
 void egl_make_current(void);
