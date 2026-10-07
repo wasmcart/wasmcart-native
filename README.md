@@ -18,6 +18,8 @@ Options:
   --fullscreen    Start in fullscreen mode
   --fps           Show FPS counter
   --uncapped      Disable vsync and frame cap
+  --max-memory GB Stop the player (exit 3) once its resident memory passes GB
+                  (default 10; 0 = no limit)
   --msaa N        Multisampled window surface (N samples) for GL carts, a browser's antialias: true
   --no-direct     Always present GL carts through the redirect FBO (by default a cart
                   draws straight onto the window when it is exactly the cart's size)

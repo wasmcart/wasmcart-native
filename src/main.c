@@ -18,6 +18,10 @@
 #include <stdbool.h>
 #include <signal.h>
 #include <math.h>
+#ifndef _WIN32
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 
 #define MAX_CONTROLLERS 4
 
@@ -53,11 +57,49 @@ static void print_usage(const char* argv0) {
     fprintf(stderr, "  --fullscreen    Start in fullscreen mode\n");
     fprintf(stderr, "  --fps           Show FPS counter\n");
     fprintf(stderr, "  --uncapped      Disable vsync and frame cap\n");
+    fprintf(stderr, "  --max-memory GB Stop the player (exit 3) once its resident memory passes GB\n");
+    fprintf(stderr, "                  (default 10; 0 = no limit)\n");
     fprintf(stderr, "  --fixed-step MS Host clock advances exactly MS per frame (deterministic tests)\n");
     fprintf(stderr, "  --shot N FILE   Save frame N of a GL or WebGPU cart as a PPM (tests)\n");
     fprintf(stderr, "  --debug-dump N FILE  After frame N, write the cart's debug state as JSON (tests)\n");
     fprintf(stderr, "  --debug-cmd N TEXT   Before frame N, post TEXT to a cartwheel-style dbg.cmd mailbox;\n");
     fprintf(stderr, "                       replies (dbg.reply) print to stderr (repeatable)\n");
+}
+
+// ─── Memory ceiling (--max-memory) ─────────────────────────────────────────
+// A watchdog thread checks the process's peak resident size and ends the run
+// once it passes the limit: a runaway player must not take the machine down
+// (a headless uncapped run reached 50 GB on 2026-10-07 and the OOM killer
+// took the user's terminal with it). Exit status 3 says it was the ceiling.
+// On by default, like Node's heap limit: a wasm32 cart's memory tops out at
+// 4 GB, so 10 GB leaves the host and the GPU driver ample room; a cart that
+// really needs more raises it, and --max-memory 0 turns it off.
+
+#define DEFAULT_MAX_MEMORY_GB 10.0
+static uint64_t max_memory_bytes = (uint64_t)(DEFAULT_MAX_MEMORY_GB * 1073741824.0);
+
+static int memory_watchdog(void* unused) {
+    (void)unused;
+#ifndef _WIN32
+    for (;;) {
+        struct rusage ru;
+        if (getrusage(RUSAGE_SELF, &ru) == 0) {
+#ifdef __APPLE__
+            uint64_t peak = (uint64_t)ru.ru_maxrss;          /* bytes */
+#else
+            uint64_t peak = (uint64_t)ru.ru_maxrss * 1024;   /* KiB */
+#endif
+            if (peak > max_memory_bytes) {
+                fprintf(stderr, "wasmcart: resident memory %llu MB passed --max-memory %.1f GB: stopping\n",
+                    (unsigned long long)(peak >> 20), max_memory_bytes / 1073741824.0);
+                fflush(stderr);
+                _exit(3);
+            }
+        }
+        SDL_Delay(100);
+    }
+#endif
+    return 0;
 }
 
 // ─── Controller management ─────────────────────────────────────────────────
@@ -386,6 +428,15 @@ int main(int argc, char* argv[]) {
             show_fps = true;
         else if (strcmp(argv[i], "--uncapped") == 0)
             uncapped = true;
+        else if (strcmp(argv[i], "--max-memory") == 0 && i + 1 < argc) {
+            char* end = NULL;
+            double gb = strtod(argv[++i], &end);
+            if (end == argv[i] || *end || !(gb >= 0.0)) {
+                fprintf(stderr, "wasmcart: --max-memory needs a number of gigabytes (0 = no limit)\n");
+                return 1;
+            }
+            max_memory_bytes = (uint64_t)(gb * 1073741824.0);
+        }
         else if (strcmp(argv[i], "--msaa") == 0 && i + 1 < argc)
             egl_set_samples(atoi(argv[++i]));
         else if (strcmp(argv[i], "--no-direct") == 0)
@@ -410,6 +461,14 @@ int main(int argc, char* argv[]) {
             shot_frame = atol(argv[++i]);
             shot_path = argv[++i];
         }
+    }
+
+    if (max_memory_bytes) {
+#ifndef _WIN32
+        SDL_Thread* t = SDL_CreateThread(memory_watchdog, "wc-memory", NULL);
+        if (t) SDL_DetachThread(t);
+        else fprintf(stderr, "wasmcart: no --max-memory watchdog: %s\n", SDL_GetError());
+#endif
     }
 
     // 1. Create host
@@ -673,6 +732,7 @@ int main(int argc, char* argv[]) {
 
     // 5. Open audio device
     SDL_AudioDeviceID audio_dev = 0;
+    uint32_t audio_max_queued = 0; /* bytes: half a second */
     uint32_t audio_rate = info->audio_sample_rate ? info->audio_sample_rate : 48000;
     bool audio_f32 = (info->flags & WC_FLAG_AUDIO_F32) != 0;
 
@@ -693,6 +753,7 @@ int main(int argc, char* argv[]) {
             uint8_t* silence = calloc(1, seed_bytes);
             SDL_QueueAudio(audio_dev, silence, seed_bytes);
             free(silence);
+            audio_max_queued = (uint32_t)have.freq / 2 * have.channels * (audio_f32 ? 4 : 2);
             SDL_PauseAudioDevice(audio_dev, 0);
             fprintf(stderr, "wasmcart: audio %uHz %s stereo\n",
                 have.freq, audio_f32 ? "F32" : "S16");
@@ -936,7 +997,13 @@ int main(int argc, char* argv[]) {
             const void* audio = wc_host_get_audio(host, &num_audio_frames, &is_f32_out);
             if (num_audio_frames > 0) {
                 uint32_t bytes = num_audio_frames * (is_f32_out ? 8 : 4);
-                SDL_QueueAudio(audio_dev, audio, bytes);
+                /* The device drains in real time; a run faster than real time
+                 * (--uncapped, --fixed-step) queued a frame of audio per frame
+                 * and grew without bound (0.5 GB/s at 78k frames/s, 50 GB
+                 * before the OOM killer on 2026-10-07). Past half a second
+                 * queued, drop the frame's audio. */
+                if (SDL_GetQueuedAudioSize(audio_dev) < audio_max_queued)
+                    SDL_QueueAudio(audio_dev, audio, bytes);
             }
         }
 
