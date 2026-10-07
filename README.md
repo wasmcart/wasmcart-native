@@ -24,7 +24,9 @@ Options:
   --no-direct     Always present GL carts through the redirect FBO (by default a cart
                   draws straight onto the window when it is exactly the cart's size)
   --fixed-step MS The host clock advances exactly MS milliseconds per frame
-                  (time_ms = frame * MS) instead of wall time (tests)
+                  (time_ms = frame * MS) instead of wall time (tests). The run
+                  neither loads nor writes the cart's .sav, so earlier progress
+                  can't change what a test plays
   --shot N FILE   Save frame N of a GL or WebGPU cart as a PPM (tests); with
                   --fixed-step the capture is reproducible
 

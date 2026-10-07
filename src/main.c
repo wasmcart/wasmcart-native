@@ -59,7 +59,8 @@ static void print_usage(const char* argv0) {
     fprintf(stderr, "  --uncapped      Disable vsync and frame cap\n");
     fprintf(stderr, "  --max-memory GB Stop the player (exit 3) once its resident memory passes GB\n");
     fprintf(stderr, "                  (default 10; 0 = no limit)\n");
-    fprintf(stderr, "  --fixed-step MS Host clock advances exactly MS per frame (deterministic tests)\n");
+    fprintf(stderr, "  --fixed-step MS Host clock advances exactly MS per frame (deterministic tests;\n");
+    fprintf(stderr, "                  the run starts with no save and writes none)\n");
     fprintf(stderr, "  --shot N FILE   Save frame N of a GL or WebGPU cart as a PPM (tests)\n");
     fprintf(stderr, "  --debug-dump N FILE  After frame N, write the cart's debug state as JSON (tests)\n");
     fprintf(stderr, "  --debug-cmd N TEXT   Before frame N, post TEXT to a cartwheel-style dbg.cmd mailbox;\n");
@@ -547,10 +548,12 @@ int main(int argc, char* argv[]) {
     wc_host_set_gl_loader(host, (wc_gl_get_proc_fn)lazy_gl_proc);
 
     // 3. Load cart
-    char sav_path[4096];
-    sav_path_for(cart_path, sav_path, sizeof(sav_path));
+    // A --fixed-step run is a test: it starts from no save and leaves none
+    // behind, so a previous run's progress can't change what it plays.
+    char sav_path[4096] = "";
+    if (fixed_step <= 0.0) sav_path_for(cart_path, sav_path, sizeof(sav_path));
     uint32_t sav_size = 0;
-    uint8_t* sav_data = load_sav(sav_path, &sav_size);
+    uint8_t* sav_data = sav_path[0] ? load_sav(sav_path, &sav_size) : NULL;
 
     wc_host_options_t opts = {
         .preferred_width = pref_width,
@@ -1118,7 +1121,7 @@ int main(int argc, char* argv[]) {
     if (renderer) SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     egl_destroy();
-    persist_sav(host, sav_path);  // before destroy: reads the cart's memory
+    if (sav_path[0]) persist_sav(host, sav_path);  // before destroy: reads the cart's memory
     wc_host_destroy(host);
     free(sav_data);
     SDL_Quit();
