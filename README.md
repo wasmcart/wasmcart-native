@@ -34,6 +34,11 @@ Environment:
   WASMCART_WGPU_POWER=low-power|high-performance
                          Which GPU WebGPU carts get on a two-GPU machine
                          (low-power = integrated); the choice is logged
+  SDL_VIDEODRIVER=offscreen (or dummy)
+                         Headless: no window, and GL runs on an EGL surfaceless
+                         context, so tests never touch the X or Wayland server.
+                         Pin the GPU for tests too (WASMCART_WGPU_POWER for
+                         WebGPU, MESA_VK_DEVICE_SELECT / DRI_PRIME for drivers)
 ```
 
 ## What It Runs

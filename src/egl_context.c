@@ -2,6 +2,12 @@
 
 #include "egl_context.h"
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <stdlib.h>
+#include <string.h>
+#ifndef EGL_PLATFORM_SURFACELESS_MESA
+#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#endif
 #include <GLES3/gl3.h>
 #include <stdio.h>
 
@@ -40,6 +46,15 @@ static int mac_desired_sync = -1;
 static bool mac_sync_applied = true;
 #endif
 
+#ifndef __APPLE__
+/* Headless when SDL will make no real window. */
+static bool egl_headless_requested(void) {
+    const char* d = getenv("SDL_VIDEODRIVER");
+    return d && (strcmp(d, "offscreen") == 0 || strcmp(d, "dummy") == 0);
+}
+#endif
+static bool headless = false;
+
 int egl_create_context(uint32_t width, uint32_t height) {
 #ifdef __APPLE__
     /* Prefer ANGLE's Metal backend. The default display resolves to the
@@ -59,7 +74,23 @@ int egl_create_context(uint32_t width, uint32_t height) {
     if (egl_display == EGL_NO_DISPLAY)
         egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
 #else
-    egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    /* Headless (SDL_VIDEODRIVER=offscreen or dummy: tests, --shot runs): no
+     * window will ever exist, so take Mesa's surfaceless platform and never
+     * touch the user's X or Wayland server. The default display would open
+     * one, and fails outright when there is no usable X display. */
+    headless = egl_headless_requested();
+    if (headless) {
+        PFNEGLGETPLATFORMDISPLAYEXTPROC get_platform_display =
+            (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+        if (get_platform_display)
+            egl_display = get_platform_display(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
+        if (egl_display == EGL_NO_DISPLAY) {
+            fprintf(stderr, "wasmcart: no surfaceless EGL display; using the default one\n");
+            headless = false;
+        }
+    }
+    if (egl_display == EGL_NO_DISPLAY)
+        egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
 #endif
     if (egl_display == EGL_NO_DISPLAY) {
         fprintf(stderr, "wasmcart: eglGetDisplay failed\n");
@@ -77,7 +108,7 @@ int egl_create_context(uint32_t width, uint32_t height) {
     // falling back to the plain config if the display has none)
     EGLint config_attribs[] = {
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
-        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT | EGL_WINDOW_BIT,
+        EGL_SURFACE_TYPE, headless ? EGL_PBUFFER_BIT : (EGL_PBUFFER_BIT | EGL_WINDOW_BIT),
         EGL_RED_SIZE, 8,
         EGL_GREEN_SIZE, 8,
         EGL_BLUE_SIZE, 8,
