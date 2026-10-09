@@ -20,6 +20,8 @@ extern "C" {
 // #defines don't rewrite the header declarations.)
 #include "gl_procs.h"
 #include "wc_log.h"
+#include <string>
+#include <unordered_map>
 
 // V8 context accessor — defined in cart_host.cpp
 extern v8::Isolate* g_isolate;
@@ -178,33 +180,23 @@ GL_REG(glGetBooleanv, 2, 0, glGetBooleanv(A_U32(0), (GLboolean*)wptr(A_U32(1))))
 GL_REG(glGetInternalformativ, 5, 0,
     glGetInternalformativ(A_U32(0), A_U32(1), A_U32(2), A_I32(3), (GLint*)wptr(A_U32(4))))
 
-// glGetString: allocate buffer via cart's malloc (cache per GL_xxx name)
-static uint32_t _glstring_cache[8] = {0};
-// NOTE: if you change overridden strings (GL_VERSION, GL_EXTENSIONS, etc.),
-// clear _glstring_cache or the old value persists.
+// glGetString / glGetStringi return pointers INTO THE CART'S MEMORY, in
+// blocks the cart allocates (wc_cart_alloc: its wc_alloc export). GL strings
+// are static (GLES 3.0 6.1.6), so each distinct string is allocated once,
+// cached for the cart's lifetime and never freed. Cleared when a cart loads.
+static std::unordered_map<std::string, uint32_t> _glstring_cache;
 
-// Forward declare — defined in cart_host.cpp
-extern "C" v8::Global<v8::Function>* wc_get_malloc_fn(wc_host_t* host);
-extern "C" void wc_refresh_memory(wc_host_t* host);
-
-static uint32_t _gl_alloc_string(wc_host_t* host, const char* s) {
+// Returns the cart pointer, or 0 with a JS exception pending (the caller
+// returns at once, which traps the cart with the allocator error).
+static uint32_t _gl_cart_string(wc_host_t* host, const char* s, const char* what) {
+    auto it = _glstring_cache.find(s);
+    if (it != _glstring_cache.end()) return it->second;
     size_t len = strlen(s);
-    auto* malloc_fn = wc_get_malloc_fn(host);
-    if (!malloc_fn || malloc_fn->IsEmpty()) return 0;
-
-    v8::Local<v8::Value> arg = v8::Integer::New(g_isolate, (int32_t)(len + 1));
-    auto result = malloc_fn->Get(g_isolate)->Call(ctx(), ctx()->Global(), 1, &arg);
-    if (result.IsEmpty()) return 0;
-
-    uint32_t ptr = result.ToLocalChecked()->Uint32Value(ctx()).FromJust();
-    // Refresh memory (malloc may grow) — caller must be in V8 scopes
-    wc_refresh_memory(host);
-    if (ptr && ptr + len + 1 <= host->memory_size) {
-        memcpy(host->memory + ptr, s, len);
-        host->memory[ptr + len] = 0;
-        return ptr;
-    }
-    return 0;
+    uint32_t ptr = wc_cart_alloc(host, (uint32_t)len + 1, 1, what);
+    if (!ptr) return 0;
+    memcpy(host->memory + ptr, s, len + 1);
+    _glstring_cache.emplace(s, ptr);
+    return ptr;
 }
 
 // Build extension string from glGetStringi (Core profile returns empty from glGetString)
@@ -293,14 +285,9 @@ GL_REG(glGetString, 1, 1, {
         }
     }
     if (!s) { R_I32(0); } else {
-        int idx = (name == 0x1F00) ? 0 : (name == 0x1F01) ? 1 : (name == 0x1F02) ? 2 :
-                  (name == 0x1F03) ? 3 : (name == 0x8B8C) ? 4 : 5;
-        if (_glstring_cache[idx]) { R_I32(_glstring_cache[idx]); }
-        else {
-            uint32_t ptr = _gl_alloc_string(_host, s);
-            _glstring_cache[idx] = ptr;
-            R_I32(ptr);
-        }
+        uint32_t ptr = _gl_cart_string(_host, s, "glGetString");
+        if (!ptr) return;  // allocator error pending: the cart traps
+        R_I32(ptr);
     }
 })
 
@@ -675,7 +662,8 @@ GL_REG(glGetStringi, 2, 1, {
         }
     }
     if (!s) { R_I32(0); } else {
-        uint32_t ptr = _gl_alloc_string(_host, s);
+        uint32_t ptr = _gl_cart_string(_host, s, "glGetStringi");
+        if (!ptr) return;  // allocator error pending: the cart traps
         R_I32(ptr);
     }
 })
@@ -842,12 +830,49 @@ GL_REG(glClientWaitSync, 3, 1, R_I32(glClientWaitSync((GLsync)(uintptr_t)A_U32(0
 
 // ─── Buffer mapping ───────────────────────────────────────────────────────
 
+// A mapping the cart can write must be in the cart's memory, so it is
+// emulated, as on the JS hosts: glMapBufferRange returns a block the cart
+// allocates (wc_cart_alloc), filled from the buffer unless the cart asked to
+// invalidate it; glUnmapBuffer writes it back with glBufferSubData when the
+// mapping was writable, then frees it. The driver's own mapping is held only
+// for the copy in.
+struct _gl_mapping { GLintptr offset; GLsizeiptr length; GLbitfield access; uint32_t ptr; };
+static std::unordered_map<GLenum, _gl_mapping> _gl_mappings;  // by target
+
 GL_REG(glMapBufferRange, 4, 1, {
-    void* ptr = glMapBufferRange(A_U32(0), A_I32(1), A_I32(2), A_U32(3));
-    // Can't return a host pointer to WASM — return 0 (unsupported in WASM context)
-    R_I32(0);
+    GLenum target = A_U32(0);
+    int32_t offset = A_I32(1);
+    int32_t length = A_I32(2);
+    GLbitfield access = A_U32(3);
+    if (offset < 0 || length <= 0 || !(access & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT)) ||
+        _gl_mappings.count(target)) {
+        R_I32(0);  // GL_INVALID_VALUE / GL_INVALID_OPERATION cases: NULL
+        return;
+    }
+    uint32_t ptr = wc_cart_alloc(_host, (uint32_t)length, 16, "glMapBufferRange");
+    if (!ptr) return;  // allocator error pending: the cart traps
+    if (!(access & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT))) {
+        void* src = glMapBufferRange(target, offset, length, GL_MAP_READ_BIT);
+        if (src) {
+            memcpy(_host->memory + ptr, src, (size_t)length);
+            glUnmapBuffer(target);
+        }
+    }
+    _gl_mapping& m = _gl_mappings[target];
+    m.offset = offset; m.length = length; m.access = access; m.ptr = ptr;
+    R_I32(ptr);
 })
-GL_REG(glUnmapBuffer, 1, 1, R_I32(glUnmapBuffer(A_U32(0))))
+GL_REG(glUnmapBuffer, 1, 1, {
+    GLenum target = A_U32(0);
+    auto it = _gl_mappings.find(target);
+    if (it == _gl_mappings.end()) { R_I32(glUnmapBuffer(target)); return; }
+    _gl_mapping m = it->second;
+    _gl_mappings.erase(it);
+    if (m.access & GL_MAP_WRITE_BIT)
+        glBufferSubData(target, m.offset, m.length, _host->memory + m.ptr);
+    wc_cart_free(_host, m.ptr, (uint32_t)m.length);
+    R_I32(1);
+})
 
 // ─── Extra attribs / params ───────────────────────────────────────────────
 
@@ -1367,6 +1392,9 @@ extern "C" void wc_gl_imports_init(wc_host_t* host) {
 extern "C" void wc_gl_build_v8_imports(v8::Isolate* isolate, v8::Local<v8::Context> context,
     v8::Local<v8::Object> gl_obj, v8::Local<v8::Object> env_obj, wc_host_t* host) {
     _host = host;
+    // Cart pointers from a previous cart are meaningless in this one.
+    _glstring_cache.clear();
+    _gl_mappings.clear();
 
     int idx = 0;
     for (const gl_import_entry_t* e = gl_table; e->name; e++, idx++) {
