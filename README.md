@@ -247,10 +247,8 @@ browser talks to it here without change, and an embedder does nothing. For a
 host-supplied peer the embedder provides a send callback, feeds inbound bytes
 with `wc_host_peer_recv()`, and reports a drop with `wc_host_remove_peer()`.
 
-Payloads are staged into the cart's own `malloc` where it exports one, and
-otherwise into a page grown onto the END of linear memory. Never into spare
-existing memory: that is how the JS host once silently overwrote a small cart's
-statics.
+Payloads (like `wc_on_text` strings) are copied into a block the cart
+allocates and freed after the call; see "Cart memory the host writes" below.
 
 Async work (connections, messages, timers) advances once per frame from
 `wc_host_run_frame()`. An embedder driving async work outside a frame loop --
@@ -298,6 +296,8 @@ sh test/input_guard_test.sh   # keyboard is not also a gamepad while typing
 ./peer_test 8796 <granted.wasc> <ungranted.wasc>   # wc_peer_* end to end
 ./seed_test ../wasmcart/test/fixtures/detrng.wasc  # entropy differs, pinned reproduces
 sh test/wgpu_test.sh          # WebGPU carts (needs a build with WebGPU support)
+sh test/alloc_test.sh         # GL strings/mappings in the cart's wc_alloc blocks
+./alloc_payload_test test/alloc   # text and peer payloads through wc_alloc
 ```
 
 `text_test` takes the cart's debug-field offsets as arguments because they move
@@ -311,6 +311,24 @@ Two traps worth knowing before writing another one:
   anything, which reads like a host bug rather than a harness bug.
 - A static library does not relink automatically. Rebuilding `libwasmcart.a`
   and re-running a stale test binary produces confident wrong answers.
+
+### Cart memory the host writes
+
+Some host calls must hand the cart bytes at an address in its memory:
+`glGetString`/`glGetStringi` return a string pointer, `glMapBufferRange` a
+mapping, and `wc_on_text`/`wc_peer_on_message` take `(ptr, len)`. The host
+writes these only into blocks the cart allocates with its optional
+`wc_alloc(size, align)` export and releases with `wc_free(ptr)` (wasmcart 0.32;
+see wasmcart's SPEC.md, "Cart memory the host writes"; `wasmcart.h` defines and
+exports them). Every pointer the cart returns is checked against its memory and
+the alignment asked for before anything is written. A cart that never reaches
+such a path needs no allocator. One that does and exports none is stopped at
+that call with an error naming it. A cart built before 0.32 that exports only
+`malloc`/`free` still works, with one deprecation warning per load. GL strings
+are allocated once each and never freed; a mapping is allocated at map and
+freed at unmap; a payload is freed when the cart's handler returns.
+(`wc_cart_alloc` is in `cart_host.cpp`; `test/alloc_test.sh` and
+`test/alloc_payload_test.c` pin it.)
 
 ### GL Import Bridge (gl_imports.cpp)
 
