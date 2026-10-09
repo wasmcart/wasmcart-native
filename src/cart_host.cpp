@@ -63,13 +63,11 @@ struct v8_host_state {
     v8::Global<v8::Function> fn_malloc;
     v8::Global<v8::Function> fn_wc_set_seed;
     v8::Global<v8::Object> memory_obj;   // WebAssembly.Memory
+    v8::Global<v8::Object> jit;          // runtime code generation: createJitImports(...) + attach()
 
     // WASI threads (wasi.thread-spawn). Empty for a cart that does not spawn.
     v8::Global<v8::Object> threads;      // { spawn, shutdown, count } from WC_THREADS_SPAWNER_JS
     v8::Global<v8::Function> thread_spawn_fn;
-
-    // Runtime code generation: createJitImports(...) from jit_js.h, plus attach().
-    v8::Global<v8::Object> jit;
 };
 
 // ─── V8 helpers ──────────────────────────────────────────────────────────
