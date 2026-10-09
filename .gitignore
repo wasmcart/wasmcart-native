@@ -17,3 +17,4 @@ deps/libnode/
 # Host runtime logs written next to a cart when it runs
 wasmcart.log
 **/wasmcart.log
+out/

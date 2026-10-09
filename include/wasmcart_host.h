@@ -206,6 +206,11 @@ typedef struct {
     // rng_seed exactly, same as the JS hosts' deterministic:{seed}.
     uint32_t rng_seed;
     bool     rng_seed_set;
+    // Runtime code generation (wasmcart SPEC.md, "Runtime code generation").
+    // true is the loud off switch (so is WASMCART_JIT=0): the cart's links
+    // get -1, and wc_host_jit_notice() returns the notice the embedder MUST
+    // show the user, where they are looking, once the cart has asked.
+    bool     jit_disabled;
 } wc_host_options_t;
 
 // ─── Host API ──────────────────────────────────────────────────────────────
@@ -352,6 +357,15 @@ void wc_host_pump(wc_host_t* host);
 
 // Run one frame — calls wc_render() on the cart
 void wc_host_run_frame(wc_host_t* host);
+
+// ─── Runtime code generation ───────────────────────────────────────────────
+// After writing a save state or rewind snapshot back into cart memory: unlink
+// every slot the cart linked (they are never carried across a restore) and
+// drop compiles in flight.
+void wc_host_jit_unlink_all(wc_host_t* host);
+// NULL, or the off-switch notice once a cart has called a JIT import while
+// runtime code generation is off. Show it (window title, OSD, toast).
+const char* wc_host_jit_notice(wc_host_t* host);
 
 // V8 locking — hold locker persistently for hosts that call from the same thread
 void wc_host_enter_v8(void);

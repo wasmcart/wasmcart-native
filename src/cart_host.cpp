@@ -33,6 +33,7 @@ extern "C" {
 #include <vector>
 #include "wc_log.h"
 #include "thread_worker_js.h"
+#include "jit_js.h"
 #include "../deps/miniz.h"
 extern "C" FILE* _wc_log_file = NULL;
 extern "C" long _wc_log_bytes = 0;
@@ -66,6 +67,9 @@ struct v8_host_state {
     // WASI threads (wasi.thread-spawn). Empty for a cart that does not spawn.
     v8::Global<v8::Object> threads;      // { spawn, shutdown, count } from WC_THREADS_SPAWNER_JS
     v8::Global<v8::Function> thread_spawn_fn;
+
+    // Runtime code generation: createJitImports(...) from jit_js.h, plus attach().
+    v8::Global<v8::Object> jit;
 };
 
 // ─── V8 helpers ──────────────────────────────────────────────────────────
@@ -1130,6 +1134,71 @@ static void v8_thread_spawn(const v8::FunctionCallbackInfo<v8::Value>& args) {
 // entry sits in it. Workers cannot call into this C code (they are separate
 // isolates), and the main thread may be parked in a futex wait, so they read
 // the archive themselves with the same lookup rules as asset_loader.c.
+// ─── Runtime code generation (wasmcart SPEC.md) ─────────────────────────────
+// The host side is wasmcart's own src/jit.js (jit_js.h, generated), so every
+// V8 host links, limits, owns and refuses identically. Native compiles
+// synchronously. This wrapper holds the instance the links belong to.
+static const char WC_JIT_HOST_JS[] = R"WCJS((function (lib, disabled, notice) {
+  'use strict';
+  let inst = null, mem = null;
+  const jit = lib.createJitImports({
+    getInstance: () => inst,
+    getMemory: (i) => i.exports.memory || mem,
+    mode: 'sync', disabled, onNotice: notice,
+  });
+  jit.attach = (i, m) => { inst = i; mem = m || null; };
+  return jit;
+}))WCJS";
+
+static void v8_jit_notice(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    v8::String::Utf8Value msg(g_isolate, args[0]);
+    wc_log("\n*** %s ***\n\n", *msg ? *msg : "runtime code generation is off");
+    if (host) snprintf(host->jit_notice, sizeof(host->jit_notice), "%s", *msg ? *msg : "");
+}
+
+// Build this cart's JIT imports into env. Returns false on a setup failure.
+static bool build_jit_imports(wc_host_t* host, v8::Local<v8::Object> env) {
+    auto state = (v8_host_state*)host->v8_state;
+    v8::Local<v8::Script> sc;
+    v8::Local<v8::Value> lib, wrap, jit;
+    if (!v8::Script::Compile(ctx(), v8str(WC_JIT_LIB_JS)).ToLocal(&sc) || !sc->Run(ctx()).ToLocal(&lib) ||
+        !v8::Script::Compile(ctx(), v8str(WC_JIT_HOST_JS)).ToLocal(&sc) || !sc->Run(ctx()).ToLocal(&wrap) ||
+        !wrap->IsFunction())
+        return false;
+    v8::Local<v8::Value> args[] = { lib, v8::Boolean::New(g_isolate, host->jit_disabled), make_fn(v8_jit_notice) };
+    if (!wrap.As<v8::Function>()->Call(ctx(), ctx()->Global(), 3, args).ToLocal(&jit) || !jit->IsObject())
+        return false;
+    state->jit.Reset(g_isolate, jit.As<v8::Object>());
+    auto imps = jit.As<v8::Object>()->Get(ctx(), v8str("imports")).ToLocalChecked().As<v8::Object>();
+    for (const char* n : { "wc_jit_link", "wc_jit_unlink", "wc_jit_config" })
+        env->Set(ctx(), v8str(n), imps->Get(ctx(), v8str(n)).ToLocalChecked()).Check();
+    return true;
+}
+
+static void jit_call(wc_host_t* host, const char* method, int argc, v8::Local<v8::Value>* argv) {
+    auto state = (v8_host_state*)host->v8_state;
+    if (!state || state->jit.IsEmpty()) return;
+    auto jit = state->jit.Get(g_isolate);
+    v8::Local<v8::Value> fn;
+    if (!jit->Get(ctx(), v8str(method)).ToLocal(&fn) || !fn->IsFunction()) return;
+    v8::TryCatch tc(g_isolate);
+    (void)fn.As<v8::Function>()->Call(ctx(), jit, argc, argv);
+}
+
+extern "C" void wc_host_jit_unlink_all(wc_host_t* host) {
+    if (!host || !host->v8_state) return;
+    v8::Locker locker(g_isolate);
+    v8::Isolate::Scope isolate_scope(g_isolate);
+    v8::HandleScope handle_scope(g_isolate);
+    v8::Context::Scope context_scope(ctx());
+    jit_call(host, "unlinkAll", 0, nullptr);
+}
+
+extern "C" const char* wc_host_jit_notice(wc_host_t* host) {
+    return host && host->jit_notice[0] ? host->jit_notice : nullptr;
+}
+
 static v8::Local<v8::Object> build_thread_cfg(wc_host_t* host, const char* wasc_path) {
     auto cfg = v8::Object::New(g_isolate);
     auto index = v8::Object::New(g_isolate);
@@ -1168,6 +1237,7 @@ static v8::Local<v8::Object> build_thread_cfg(wc_host_t* host, const char* wasc_
     } else {
         cfg->Set(ctx(), v8str("fileList"), v8::Null(g_isolate)).Check();
     }
+    cfg->Set(ctx(), v8str("jitDisabled"), v8::Boolean::New(g_isolate, host->jit_disabled)).Check();
     return cfg;
 }
 
@@ -1421,6 +1491,15 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     auto imports = v8::Object::New(g_isolate);
     auto env_imports = build_env_imports();
     auto wasi_imports = build_wasi_imports();
+    {
+        const char* jit_env = getenv("WASMCART_JIT");
+        host->jit_disabled = (opts && opts->jit_disabled) || (jit_env && strcmp(jit_env, "0") == 0);
+        host->jit_notice[0] = 0;
+        if (!build_jit_imports(host, env_imports)) {
+            wc_log("wasmcart: failed to set up runtime code generation\n");
+            return -1;
+        }
+    }
 
     imports->Set(ctx(), v8str("env"), env_imports).Check();
     imports->Set(ctx(), v8str("wasi_snapshot_preview1"), wasi_imports).Check();
@@ -1553,7 +1632,8 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
                 return -1;
             }
             v8::Local<v8::Value> f_args[] = {
-                wasm_module, imported_memory, build_thread_cfg(host, wasc_path), v8str(WC_THREAD_WORKER_JS),
+                wasm_module, imported_memory, build_thread_cfg(host, wasc_path),
+                v8str((std::string("const __wcJitLib = ") + WC_JIT_LIB_JS + ";\n" + WC_THREAD_WORKER_JS).c_str()),
             };
             v8::Local<v8::Value> threads;
             if (!factory.As<v8::Function>()->Call(ctx(), ctx()->Global(), 4, f_args).ToLocal(&threads) ||
@@ -1657,6 +1737,11 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     }
     auto instance = instance_result.ToLocalChecked();
     state->instance.Reset(g_isolate, instance);
+    {
+        v8::Local<v8::Value> a[] = { instance, imported_memory.IsEmpty()
+            ? v8::Undefined(g_isolate).As<v8::Value>() : imported_memory.As<v8::Value>() };
+        jit_call(host, "attach", 2, a);
+    }
 
     // 5. Get exports
     auto exports = instance->Get(ctx(), v8str("exports")).ToLocalChecked().As<v8::Object>();
