@@ -15,7 +15,8 @@ const path = require('node:path');
 
 module.exports = function createBridge(dir) {
   const dawn = require(path.join(dir, 'dawn.node'));
-  const host = require(path.join(dir, 'host.js'));
+  // wasmcart's src/ tree as CMake copies it (host.js imports ../cartMemory.js)
+  const host = require(path.join(dir, 'src', 'wgpu', 'host.js'));
   let gpu = null;
   const sessions = new Map();
 

@@ -104,8 +104,9 @@ cmake .. -DWASMCART_WGPU_JS_DIR=<wasmcart 0.32.0 or later>/src/wgpu \
 ```
 
 Every build then refreshes a `wgpu/` directory beside `wasmcart-run`: the
-bridge (`src/wgpu_bridge.cjs`), wasmcart's `host.js` and generated glue, and
-`dawn.node` + `libwebgpu_dawn.so`. Ship that directory with the binary.
+bridge (`src/wgpu_bridge.cjs`), wasmcart's `host.js` and generated glue (in
+`src/wgpu/`, beside the `src/cartMemory.js` they import), and `dawn.node` +
+`libwebgpu_dawn.so`. Ship that directory with the binary.
 Without it the player has no WebGPU: a WebGPU-only cart is refused at load
 with that reason, and a cart that also imports GL runs on GL (which is how
 the libretro and Android builds behave today).
