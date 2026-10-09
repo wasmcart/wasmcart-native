@@ -305,7 +305,7 @@ WASMCART_WGPU_DIR=$PWD/build/wgpu ./wgpu_alloc_test test/wgpu/wgpucart.wasc
 ```
 
 `text_test` takes the cart's debug-field offsets as arguments because they move
-whenever the fixture is recompiled -- linking `malloc` alone shifted them 16
+whenever the fixture is recompiled -- linking an allocator alone shifted them 16
 bytes. Read them with wasmcart's `readDebugState()`.
 
 Two traps worth knowing before writing another one:
@@ -326,9 +326,11 @@ writes these only into blocks the cart allocates with its optional
 see wasmcart's SPEC.md, "Cart memory the host writes"; `wasmcart.h` defines and
 exports them). Every pointer the cart returns is checked against its memory and
 the alignment asked for before anything is written. A cart that never reaches
-such a path needs no allocator. One that does and exports none is stopped at
-that call with an error naming it. A cart built before 0.32 that exports only
-`malloc`/`free` still works, with one deprecation warning per load. GL strings
+such a path needs no allocator. One that does and lacks `wc_alloc`/`wc_free` is
+stopped at that call with an error naming it -- including a cart built before
+0.32 that exports only `malloc`/`free`: the host never calls a cart's `malloc`
+(rebuild it against 0.32's `wasmcart.h`). A WebGPU callback that hits this
+inside Node's event loop stops the cart on the next frame. GL strings
 are allocated once each and never freed; a mapping is allocated at map and
 freed at unmap; a payload is freed when the cart's handler returns.
 (`wc_cart_alloc` is in `cart_host.cpp`; `test/alloc_test.sh` and

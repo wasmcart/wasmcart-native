@@ -68,6 +68,14 @@ module.exports = function createBridge(dir) {
       sessions.get(id)?.session.beginFrame();
     },
 
+    // An error kept from an async WebGPU callback (a cart-memory allocation
+    // the cart could not satisfy, e.g. no wc_alloc/wc_free): its message, once,
+    // or null. The host stops the cart with it before the next frame.
+    fatal(id) {
+      const e = sessions.get(id)?.session.takeFatal?.();
+      return e ? String(e.message || e) : null;
+    },
+
     // A window to present into. kind: xlib | wayland | win32 | metal-layer.
     // vsync false (--uncapped) presents without waiting for the display:
     // FIFO under Xwayland measured ~0.65 s per frame.

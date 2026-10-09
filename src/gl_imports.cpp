@@ -870,7 +870,7 @@ GL_REG(glUnmapBuffer, 1, 1, {
     _gl_mappings.erase(it);
     if (m.access & GL_MAP_WRITE_BIT)
         glBufferSubData(target, m.offset, m.length, _host->memory + m.ptr);
-    wc_cart_free(_host, m.ptr, (uint32_t)m.length);
+    wc_cart_free(_host, m.ptr);
     R_I32(1);
 })
 

@@ -11,7 +11,8 @@
 #                compute result read back with
 #                mapAsync (the background turns (42,0,255)), an error scope,
 #                32 MB of memory growth
-#   wgpucart031  wgpucart as built before wasmcart 0.32 (malloc, no wc_alloc)
+#   wgpucart031  wgpucart as built before wasmcart 0.32 (malloc, no wc_alloc):
+#                stopped with the missing-allocator error
 #   dualgpu      imports gl AND WebGPU; WebGPU draws green
 #   dualgpu_bad  calls glClear whatever the host selected; must trap
 #   gpuapi2/3    gpu_api values the cart does not back; refused
@@ -75,13 +76,17 @@ check "webgpu cart: clean exit"                        "$(cat "$OUT/wgpucart.sta
 
 has   "webgpu cart: the adapter it got is logged"         wgpucart "wasmcart-run: WebGPU on "
 
-# Built before wasmcart 0.32: malloc/free, no wc_alloc. Still runs, through
-# the deprecated path, warning once (test/wgpu_alloc_test.c checks the wc_alloc
-# path itself on wgpucart).
+# Built before wasmcart 0.32: malloc/free, no wc_alloc. wasmcart 0.32 never
+# uses a cart's malloc, so its first mapped range (asked for inside a mapAsync
+# callback) cannot get cart memory: the glue keeps the error and the next frame
+# stops the cart with it, exactly as for a cart with no allocator at all.
+# (test/wgpu_alloc_test.c checks the wc_alloc path itself on wgpucart.)
 run wgpucart031 8 old031
-check "malloc-only WebGPU cart: compute result"        "$(pixel old031 2 2 2>/dev/null)" "42,0,255"
-check "malloc-only WebGPU cart: deprecation warned once" "$(grep -c 'this cart has no wc_alloc/wc_free, so the host is allocating in it through its exported malloc/free' "$OUT/old031.log")" "1"
-check "malloc-only WebGPU cart: clean exit"            "$(cat "$OUT/old031.status")" "0"
+has   "malloc-only WebGPU cart: stopped, naming the call and wc_alloc/wc_free" old031 "wasmcart: wc_render trapped: wasmcart: WebGPU emwgpuBufferGetConstMappedRange must write into the cart's memory, but the cart does not export wc_alloc/wc_free (its malloc, if any, is not used)"
+has   "malloc-only WebGPU cart: the cart stops"            old031 "cart trapped, exiting"
+check "malloc-only WebGPU cart: no compute result"          "$(grep -c 'frame 8 ->' "$OUT/old031.log")" "0"
+check "malloc-only WebGPU cart: no deprecation warning"     "$(grep -ci 'deprecat' "$OUT/old031.log")" "0"
+check "malloc-only WebGPU cart: exits without crashing"     "$(cat "$OUT/old031.status")" "0"
 
 run wgpucart 3 lowpower WASMCART_WGPU_POWER=low-power
 has   "WASMCART_WGPU_POWER reaches the adapter request"     lowpower "compatibility, low-power)"

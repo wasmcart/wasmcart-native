@@ -59,8 +59,7 @@ lacks(){ if grep -qF -- "$2" "$OUT/$1.log"; then bad "$1: $3 (log: $OUT/$1.log)"
 clean(){ s=$(cat "$OUT/$1.status"); if [ "$s" -lt 128 ] || [ "$s" = 130 ]; then ok "$1: exits without crashing ($s)"; else bad "$1: died with status $s"; fi; }
 green(){ p=$(pixel "$1" 32 32); if [ "$p" = "0,255,0" ]; then ok "$1: renders green"; else bad "$1: center pixel $p, want 0,255,0"; fi; }
 
-MISSING="must write into the cart's memory, but the cart exports no allocator. Export wc_alloc(size, align) and wc_free(ptr): wasmcart.h defines them for C/C++ (include it), wasmcart's CMake helper exports them, and Rust carts get them from the wasmcart-alloc crate. See SPEC.md, \"Cart memory the host writes\"."
-DEPRECATED="wasmcart: this cart has no wc_alloc/wc_free, so the host is allocating in it through its exported malloc/free. That fallback is deprecated and will be removed: rebuild against wasmcart 0.32's wasmcart.h (or export wc_alloc and wc_free yourself)."
+MISSING="must write into the cart's memory, but the cart does not export wc_alloc/wc_free (its malloc, if any, is not used). Export wc_alloc(size, align) and wc_free(ptr): wasmcart.h defines them for C/C++ (include it), wasmcart's CMake helper exports them, and Rust carts get them from the wasmcart-alloc crate. See SPEC.md, \"Cart memory the host writes\"."
 
 echo "wc_alloc/wc_free: GL strings and mappings in the cart's own blocks"
 run wcalloc_gl wcalloc_gl
@@ -92,26 +91,23 @@ has   noalloc_map "wasmcart: glMapBufferRange $MISSING" "error names glMapBuffer
 has   noalloc_map 'cart trapped' "the cart stops"
 clean noalloc_map
 
-echo "malloc/free only: the deprecated transition path"
-run malloc_gl malloc_gl
-has   malloc_gl 'alloccart: map read=ok write=ok aligned16=yes map_allocs=2 map_frees=2' "mapping through malloc/free"
-has   malloc_gl 'alloccart: done ok=1' "cart's own checks pass"
-n=$(grep -cF -- "$DEPRECATED" "$OUT/malloc_gl.log")
-if [ "$n" = 1 ]; then ok "malloc_gl: deprecation warning printed exactly once"; else bad "malloc_gl: deprecation warning printed $n times, want 1"; fi
-green malloc_gl
-clean malloc_gl
-
-echo "malloc, no free: never freed, the released mapping is reused"
-run mallocnofree_gl mallocnofree_gl
-has   mallocnofree_gl 'alloccart: map read=ok write=ok aligned16=yes map_allocs=1 map_frees=0' "second mapping reuses the first block"
-green mallocnofree_gl
-clean mallocnofree_gl
-
-echo "malloc only, 8-byte aligned, and a 16-byte-aligned mapping: refused, naming malloc"
-run mallocmisalign_gl mallocmisalign_gl
-has   mallocmisalign_gl "wasmcart: glMapBufferRange: the cart's malloc(16, 16) returned 0x" "the deprecated path is bounds-checked too..."
-has   mallocmisalign_gl ", which is not 16-byte aligned" "...as misaligned"
-clean mallocmisalign_gl
+# wasmcart 0.32 is a clean break: a cart that exports malloc (with or without
+# free/memalign) but not wc_alloc/wc_free gets exactly the no-allocator error.
+# Its malloc is never called and nothing warns about a deprecated path.
+malloc_only() {  # malloc_only NAME CALL DESC (CALL: the first host write it reaches)
+  echo "$3: the same error as no allocator, malloc never used"
+  run $1 $1
+  has   $1 "wasmcart: $2 $MISSING" "error names $2 and wc_alloc/wc_free"
+  has   $1 'cart trapped' "the cart stops"
+  lacks $1 'alloccart: version=' "glGetString never returned to the cart"
+  lacks $1 'alloccart: map read=' "glMapBufferRange never returned to the cart"
+  lacks $1 'malloc(' "no allocation through malloc"
+  lacks $1 'deprecat' "no deprecation warning"
+  clean $1
+}
+malloc_only malloc_gl         glGetString      "malloc/memalign/free only"
+malloc_only mallocnofree_gl   glMapBufferRange "malloc, no free"
+malloc_only mallocmisalign_gl glMapBufferRange "malloc only (8-byte aligned)"
 
 echo "bad pointers from wc_alloc are refused before any write"
 run badptr_gl badptr_gl

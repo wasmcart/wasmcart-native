@@ -14,12 +14,12 @@ b wcalloc_gl       -DALLOC=1 -DCALLS=7   # wc_alloc/wc_free; glGetString, glGetS
 b noalloc_plain    -DALLOC=0 -DCALLS=0   # no allocator, never needs one
 b noalloc_getstr   -DALLOC=0 -DCALLS=1   # no allocator, calls glGetString
 b noalloc_map      -DALLOC=0 -DCALLS=2   # no allocator, calls glMapBufferRange
-b malloc_gl        -DALLOC=2 -DCALLS=7   # malloc/memalign/free only (deprecated path)
-b mallocnofree_gl  -DALLOC=6 -DCALLS=2   # malloc, no free: the spare is reused
-b mallocmisalign_gl -DALLOC=7 -DCALLS=2  # malloc only, 8- not 16-aligned: map refused
+b malloc_gl        -DALLOC=2 -DCALLS=7   # malloc/memalign/free only: refused like no allocator
+b mallocnofree_gl  -DALLOC=6 -DCALLS=2   # malloc, no free: refused like no allocator
+b mallocmisalign_gl -DALLOC=7 -DCALLS=2  # malloc only: refused like no allocator
 b badptr_gl        -DALLOC=3 -DCALLS=1   # wc_alloc returns 0xFFFFFFF0
 b memsize_gl       -DALLOC=4 -DCALLS=1   # wc_alloc returns the memory size
 b misalign_gl      -DALLOC=5 -DCALLS=2   # wc_alloc returns ptr % 16 == 1
 b text_wcalloc     -DALLOC=1 -DTEXT=1    # 2D: wc_on_text / wc_peer_on_message
-b text_malloc      -DALLOC=2 -DTEXT=1
+b text_malloc      -DALLOC=2 -DTEXT=1    # malloc only: refused like no allocator
 b text_noalloc     -DALLOC=0 -DTEXT=1

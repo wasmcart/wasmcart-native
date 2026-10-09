@@ -69,11 +69,9 @@ struct v8_host_state {
     // Cart memory the host writes (wc_cart_alloc). Resolved from the exports
     // on first use, not at load: a cart that never reaches such a path needs
     // no allocator at all.
-    int alloc_kind = -1;                 // -1 unresolved, 0 none, 1 wc_alloc, 2 malloc (deprecated)
-    v8::Global<v8::Function> fn_alloc;   // wc_alloc, or malloc
-    v8::Global<v8::Function> fn_memalign;
-    v8::Global<v8::Function> fn_free;    // wc_free, or free; empty: never free
-    uint32_t spare_ptr = 0, spare_size = 0;  // no free(): the largest released block
+    int alloc_kind = -1;                 // -1 unresolved, 0 none, 1 wc_alloc+wc_free
+    v8::Global<v8::Function> fn_alloc;   // wc_alloc
+    v8::Global<v8::Function> fn_free;    // wc_free
 };
 
 // ─── V8 helpers ──────────────────────────────────────────────────────────
@@ -1976,12 +1974,9 @@ extern "C" void wc_host_exit_v8(void) {
 // without malloc, and the JS host wrote at the top of memory, which is the
 // cart's live heap.
 
-static const char* const k_deprecated_malloc_msg =
-    "wasmcart: this cart has no wc_alloc/wc_free, so the host is allocating in "
-    "it through its exported malloc/free. That fallback is deprecated and will "
-    "be removed: rebuild against wasmcart 0.32's wasmcart.h (or export wc_alloc "
-    "and wc_free yourself).";
-
+// Only the cart's wc_alloc + wc_free exports are used (wasmcart 0.32). A cart
+// exporting malloc/memalign/free but not both of these is treated exactly like
+// a cart with no allocator: its malloc is never called.
 static void resolve_cart_allocator(wc_host_t* host) {
     auto state = (v8_host_state*)host->v8_state;
     if (state->alloc_kind >= 0) return;
@@ -1999,17 +1994,6 @@ static void resolve_cart_allocator(wc_host_t* host) {
         state->alloc_kind = 1;
         state->fn_alloc.Reset(g_isolate, wc_alloc);
         state->fn_free.Reset(g_isolate, wc_free);
-        return;
-    }
-    // Deprecated transition: a cart built before wasmcart 0.32 (Emscripten
-    // exports malloc/free by default). One warning per cart load.
-    auto malloc_fn = get("malloc"), memalign_fn = get("memalign"), free_fn = get("free");
-    if (!malloc_fn.IsEmpty() || !memalign_fn.IsEmpty()) {
-        state->alloc_kind = 2;
-        if (!malloc_fn.IsEmpty()) state->fn_alloc.Reset(g_isolate, malloc_fn);
-        if (!memalign_fn.IsEmpty()) state->fn_memalign.Reset(g_isolate, memalign_fn);
-        if (!free_fn.IsEmpty()) state->fn_free.Reset(g_isolate, free_fn);
-        wc_log("%s\n", k_deprecated_malloc_msg);
     }
 }
 
@@ -2028,45 +2012,21 @@ extern "C" uint32_t wc_cart_alloc(wc_host_t* host, uint32_t size, uint32_t align
     if (size == 0) size = 1;
     if (align == 0) align = 1;
     resolve_cart_allocator(host);
-    if (state->alloc_kind == 0) {
+    if (state->alloc_kind != 1) {
         return cart_alloc_fail(host, std::string("wasmcart: ") + what +
-            " must write into the cart's memory, but the cart exports no allocator. "
-            "Export wc_alloc(size, align) and wc_free(ptr): wasmcart.h defines them "
-            "for C/C++ (include it), wasmcart's CMake helper exports them, and Rust "
+            " must write into the cart's memory, but the cart does not export "
+            "wc_alloc/wc_free (its malloc, if any, is not used). Export "
+            "wc_alloc(size, align) and wc_free(ptr): wasmcart.h defines them for "
+            "C/C++ (include it), wasmcart's CMake helper exports them, and Rust "
             "carts get them from the wasmcart-alloc crate. See SPEC.md, \"Cart "
             "memory the host writes\".");
     }
 
-    // A cart without free() gets its released blocks back instead of a leak.
-    if (state->fn_free.IsEmpty() && state->spare_ptr &&
-        state->spare_size >= size && state->spare_ptr % align == 0) {
-        uint32_t p = state->spare_ptr;
-        state->spare_ptr = state->spare_size = 0;
-        return p;
-    }
-
-    const char* name;
-    v8::Local<v8::Function> fn;
-    std::vector<v8::Local<v8::Value>> argv;
-    if (state->alloc_kind == 1) {
-        name = "wc_alloc";
-        fn = state->fn_alloc.Get(g_isolate);
-        argv = { v8::Integer::NewFromUnsigned(g_isolate, size),
-                 v8::Integer::NewFromUnsigned(g_isolate, align) };
-    } else if (!state->fn_memalign.IsEmpty() && (align > 8 || state->fn_alloc.IsEmpty())) {
-        // malloc guarantees 8 on wasm32; memalign when more is needed.
-        name = "memalign";
-        fn = state->fn_memalign.Get(g_isolate);
-        argv = { v8::Integer::NewFromUnsigned(g_isolate, align),
-                 v8::Integer::NewFromUnsigned(g_isolate, size) };
-    } else {
-        name = "malloc";
-        fn = state->fn_alloc.Get(g_isolate);
-        argv = { v8::Integer::NewFromUnsigned(g_isolate, size) };
-    }
-
+    v8::Local<v8::Function> fn = state->fn_alloc.Get(g_isolate);
+    v8::Local<v8::Value> argv[2] = { v8::Integer::NewFromUnsigned(g_isolate, size),
+                                     v8::Integer::NewFromUnsigned(g_isolate, align) };
     v8::Local<v8::Value> ret;
-    if (!fn->Call(ctx(), ctx()->Global(), (int)argv.size(), argv.data()).ToLocal(&ret)) {
+    if (!fn->Call(ctx(), ctx()->Global(), 2, argv).ToLocal(&ret)) {
         // The allocator itself trapped; its exception is already pending.
         host->trapped = true;
         return 0;
@@ -2075,7 +2035,7 @@ extern "C" uint32_t wc_cart_alloc(wc_host_t* host, uint32_t size, uint32_t align
     refresh_memory(host);  // AFTER the call: the allocator may have grown memory
 
     char call[96];
-    snprintf(call, sizeof call, "the cart's %s(%u, %u)", name, size, align);
+    snprintf(call, sizeof call, "the cart's wc_alloc(%u, %u)", size, align);
     char buf[512];
     if (ptr == 0) {
         snprintf(buf, sizeof buf, "wasmcart: %s: %s returned 0 (out of memory)", what, call);
@@ -2094,18 +2054,10 @@ extern "C" uint32_t wc_cart_alloc(wc_host_t* host, uint32_t size, uint32_t align
     return ptr;
 }
 
-extern "C" void wc_cart_free(wc_host_t* host, uint32_t ptr, uint32_t size) {
+extern "C" void wc_cart_free(wc_host_t* host, uint32_t ptr) {
     if (!ptr) return;
     auto state = (v8_host_state*)host->v8_state;
-    if (state->alloc_kind <= 0) return;
-    if (state->fn_free.IsEmpty()) {
-        // No free(): keep the largest block for the next allocation.
-        if (!state->spare_ptr || size > state->spare_size) {
-            state->spare_ptr = ptr;
-            state->spare_size = size;
-        }
-        return;
-    }
+    if (state->alloc_kind != 1) return;
     v8::Local<v8::Value> a = v8::Integer::NewFromUnsigned(g_isolate, ptr);
     (void)state->fn_free.Get(g_isolate)->Call(ctx(), ctx()->Global(), 1, &a);
 }
@@ -2137,7 +2089,7 @@ static bool deliver_payload(wc_host_t* host, const char* what, v8::Local<v8::Fun
         wc_log("wasmcart: cart's %s threw: %s\n", what, *e);
         tc.Reset();
     }
-    wc_cart_free(host, ptr, len);
+    wc_cart_free(host, ptr);
     if (tc.HasCaught()) {
         v8::String::Utf8Value e(g_isolate, tc.Exception());
         wc_log("wasmcart: cart's free threw: %s\n", *e);
@@ -2477,7 +2429,19 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     deliver_text(host);         // before render, like every other input
     deliver_wheel(host);        // frame total in, zeroed again after render
     if (host->trapped) return;  // a payload the cart could not take (wc_cart_alloc)
-    if (host->uses_wgpu) wgpu_call(host, "begin");
+    if (host->uses_wgpu) {
+        // A WebGPU callback that could not get cart memory (no wc_alloc, or it
+        // failed) ran inside Node's event loop, where a throw reaches no
+        // caller; the glue kept the error, and it stops the cart here.
+        v8::Local<v8::Value> fatal = wgpu_call(host, "fatal");
+        if (fatal->IsString()) {
+            v8::String::Utf8Value msg(g_isolate, fatal);
+            wc_log("wasmcart: wc_render trapped: %s\n", *msg);
+            host->trapped = true;
+            return;
+        }
+        wgpu_call(host, "begin");
+    }
 
     auto result = state->fn_wc_render.Get(g_isolate)->Call(
         ctx(), ctx()->Global(), 0, nullptr);

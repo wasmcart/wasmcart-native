@@ -6,7 +6,7 @@
  *
  *   -DALLOC=0  no allocator at all
  *   -DALLOC=1  wc_alloc/wc_free (counted)
- *   -DALLOC=2  malloc/memalign/free only (deprecated transition path)
+ *   -DALLOC=2  malloc/memalign/free only (the host must refuse it: no wc_alloc)
  *   -DALLOC=3  wc_alloc returns 0xFFFFFFF0 (outside memory)
  *   -DALLOC=4  wc_alloc returns the memory size (one past the end)
  *   -DALLOC=5  wc_alloc returns a pointer one byte off its alignment
