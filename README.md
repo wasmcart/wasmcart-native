@@ -299,6 +299,9 @@ sh test/input_guard_test.sh   # keyboard is not also a gamepad while typing
 sh test/wgpu_test.sh          # WebGPU carts (needs a build with WebGPU support)
 sh test/alloc_test.sh         # GL strings/mappings in the cart's wc_alloc blocks
 ./alloc_payload_test test/alloc   # text and peer payloads through wc_alloc
+WASMCART_WGPU_DIR=$PWD/build/wgpu ./wgpu_alloc_test test/wgpu/wgpucart.wasc
+                              # WebGPU adapter info + mapped ranges through wc_alloc
+                              # (link it with -Wl,--dynamic-list=build/node-api-exports.list)
 ```
 
 `text_test` takes the cart's debug-field offsets as arguments because they move
