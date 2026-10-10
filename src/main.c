@@ -635,6 +635,12 @@ int main(int argc, char* argv[]) {
     // (the offscreen driver would refuse to create the window).
     if (is_wgpu && SDL_GetCurrentVideoDriver() && strcmp(SDL_GetCurrentVideoDriver(), "cocoa") == 0)
         win_flags |= SDL_WINDOW_METAL;
+    // Any other driver (offscreen, for headless runs): SDL2 on macOS adds
+    // SDL_WINDOW_OPENGL to every window that is not Metal or Vulkan, and the
+    // offscreen driver then fails to load a GL library. A WebGPU cart uses no
+    // GL, so declare the context external and SDL leaves the flag off.
+    else if (is_wgpu)
+        SDL_SetHint(SDL_HINT_VIDEO_EXTERNAL_CONTEXT, "1");
 #endif
 
     char title[300];
