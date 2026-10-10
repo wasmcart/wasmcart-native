@@ -95,8 +95,14 @@ target_link_libraries(wasmcart-run PRIVATE wasmcart)
 # SDL2 — prefer static linking for single-binary distribution
 set(SDL2_DIR "" CACHE PATH "Path to SDL2 (Windows)")
 if(WIN32 AND SDL2_DIR)
+    # SDL's VC layout: lib/x64 (its release zip) or lib/arm64 (built in CI).
+    if(CMAKE_C_COMPILER_ARCHITECTURE_ID MATCHES "ARM64")
+        set(SDL2_ARCH arm64)
+    else()
+        set(SDL2_ARCH x64)
+    endif()
     target_include_directories(wasmcart-run PRIVATE ${SDL2_DIR}/include)
-    target_link_libraries(wasmcart-run PRIVATE ${SDL2_DIR}/lib/x64/SDL2.lib ${SDL2_DIR}/lib/x64/SDL2main.lib)
+    target_link_libraries(wasmcart-run PRIVATE ${SDL2_DIR}/lib/${SDL2_ARCH}/SDL2.lib ${SDL2_DIR}/lib/${SDL2_ARCH}/SDL2main.lib)
     set(SDL2_HANDLED TRUE)
 elseif(NOT WIN32)
     find_library(SDL2_STATIC libSDL2.a PATHS
@@ -189,6 +195,26 @@ if(WASMCART_WGPU_JS_DIR AND NATIVE_DAWN_DIR)
     if(WIN32)
         set(WGPU_DAWN_FILES "${NATIVE_DAWN_DIR}/bin/dawn.node" "${NATIVE_DAWN_DIR}/bin/webgpu_dawn.dll"
             "${NATIVE_DAWN_DIR}/bin/dxcompiler.dll" "${NATIVE_DAWN_DIR}/bin/dxil.dll")
+        # Dawn's DLLs use the dynamic Visual C++ runtime (this program links
+        # it statically). Ship it beside them so WebGPU works without the VC++
+        # redistributable installed: Node loads an addon with
+        # LOAD_WITH_ALTERED_SEARCH_PATH, so its DLLs come from wgpu/.
+        set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+        include(InstallRequiredSystemLibraries)
+        foreach(_dll msvcp140 msvcp140_atomic_wait vcruntime140 vcruntime140_1)
+            set(_found "")
+            foreach(_lib ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS})
+                get_filename_component(_name "${_lib}" NAME_WE)
+                string(TOLOWER "${_name}" _name)
+                if(_name STREQUAL _dll)
+                    set(_found "${_lib}")
+                endif()
+            endforeach()
+            if(NOT _found)
+                message(FATAL_ERROR "WebGPU: no ${_dll}.dll in the Visual C++ redistributable (${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS})")
+            endif()
+            list(APPEND WGPU_DAWN_FILES "${_found}")
+        endforeach()
     elseif(APPLE)
         set(WGPU_DAWN_FILES "${NATIVE_DAWN_DIR}/lib/dawn.node" "${NATIVE_DAWN_DIR}/lib/libwebgpu_dawn.dylib")
     else()
@@ -225,8 +251,11 @@ endif()
 # this executable but not exported until listed here. A macOS executable
 # exports its global symbols already (dawn.node finds them through
 # -undefined dynamic_lookup), so strip it with `strip -x`, which keeps them.
-# Windows: native-dawn's dawn.node imports N-API from a module named node.exe,
-# which this executable is not, so it cannot load there (README).
+# Windows: libnode's N-API objects declare every napi_* function
+# __declspec(dllexport), so this executable exports them as node.exe does.
+# dawn.node (native-dawn 0.1.2+) delay-loads them from "node.exe", which its
+# delay-load hook maps to the program loading it; test/wgpu_exports.mjs checks
+# that each one it needs is exported.
 if(UNIX AND NOT APPLE)
     file(WRITE "${CMAKE_BINARY_DIR}/node-api-exports.list" "{ napi_*; node_api_*; uv_*; };\n")
     target_link_options(wasmcart-run PRIVATE "-Wl,--dynamic-list=${CMAKE_BINARY_DIR}/node-api-exports.list")

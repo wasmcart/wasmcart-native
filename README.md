@@ -54,7 +54,7 @@ Every `.wasc` cart that runs in the browser or Node.js also runs here. Same WASM
 | 2D framebuffer | SDL2 accelerated renderer, letterboxed | Snake, Doom, ccleste, pygame carts |
 | GL (GLES3) | EGL + direct GL, FBO redirect, letterboxed | OpenArena, [GZDoom](https://zdoom.org), [Neverball](https://neverball.org), ETR |
 | [Godot](https://godotengine.org) 4.x | GL + GLES3 Compatibility renderer | Warlords, RoboBlast, Kenney Platformer |
-| WebGPU (`gpu_api` 2) | Dawn (Vulkan on Linux, Metal on macOS) through native-dawn, letterboxed into a WebGPU window surface. Linux and macOS; needs a build with WebGPU (below) | [Defold](https://defold.com) WebGPU carts, three.js WebGPURenderer carts, wasi-sdk carts built with wasmcart's `wgpu-wasi/` (threads included) |
+| WebGPU (`gpu_api` 2) | Dawn (Vulkan on Linux, Metal on macOS, D3D12 on Windows) through native-dawn, letterboxed into a WebGPU window surface. Needs a build with WebGPU (below) | [Defold](https://defold.com) WebGPU carts, three.js WebGPURenderer carts, wasi-sdk carts built with wasmcart's `wgpu-wasi/` (threads included) |
 
 ## Performance
 
@@ -82,7 +82,7 @@ V8's Liftoff baseline compiler starts WASM instantly — no compilation delay, e
 ```bash
 # Download pre-built libnode
 mkdir -p deps/libnode
-curl -sL https://github.com/wasmcart/build-libnode/releases/download/v26.3.0-jsg9/libnode-linux-x86_64.tar.gz \
+curl -sL https://github.com/wasmcart/build-libnode/releases/download/v26.3.0-jsg10/libnode-linux-x86_64.tar.gz \
   | tar xz -C deps/libnode
 
 # Build
@@ -107,13 +107,16 @@ cmake .. -DWASMCART_WGPU_JS_DIR=<wasmcart 0.32.0 or later>/src/wgpu \
 
 `scripts/fetch-wgpu-deps.sh <target> <dir>` fetches both the way the release
 builds do: native-dawn's release archive for `linux-x64`, `linux-arm64`,
-`darwin-x64` or `darwin-arm64` (sha256 pinned in the script) into
+`darwin-x64`, `darwin-arm64`, `win32-x64` or `win32-arm64` (sha256 pinned in
+the script) into
 `<dir>/native-dawn`, and the wasmcart npm package into `<dir>/wasmcart`.
 
 Every build then refreshes a `wgpu/` directory beside `wasmcart-run`: the
 bridge (`src/wgpu_bridge.cjs`), wasmcart's `host.js` and generated glue (in
 `src/wgpu/`, beside the `src/cartMemory.js` they import), and `dawn.node` +
-Dawn's library (`libwebgpu_dawn.so`, `libwebgpu_dawn.dylib` on macOS). Ship that directory with the binary.
+Dawn's library (`libwebgpu_dawn.so`, `libwebgpu_dawn.dylib` on macOS;
+on Windows `webgpu_dawn.dll`, `dxcompiler.dll`, `dxil.dll` and the Visual C++
+runtime DLLs they need). Ship that directory with the binary.
 Without it the player has no WebGPU: a WebGPU-only cart is refused at load
 with that reason, and a cart that also imports GL runs on GL (which is how
 the libretro and Android builds behave today).
@@ -129,11 +132,11 @@ otherwise hidden. On macOS the executable exports them already (strip it with
 `strip -x`, which keeps them) and the cart's frame is presented through a
 CAMetalLayer.
 
-Windows has no WebGPU yet: native-dawn 0.1.1's `dawn.node` for Windows imports
-N-API from a module named `node.exe` (no delay-load hook that would redirect it
-to the host process), and `wasmcart-run.exe` is not that module, so the addon
-cannot load in it. The Windows binary is built without `wgpu/` and refuses
-WebGPU-only carts, saying the build has no WebGPU support; carts that also import GL run on GL.
+On Windows, `dawn.node` (native-dawn 0.1.2 or later) delay-loads Node-API
+from `node.exe` and its delay-load hook resolves that to the program loading
+it. libnode's N-API functions are declared `__declspec(dllexport)`, so
+`wasmcart-run.exe` exports them; `node test/wgpu_exports.mjs
+build/wasmcart-run.exe` checks that it exports every one `dawn.node` needs.
 
 `test/wgpu_test.sh` runs the WebGPU fixtures headless (render, compute
 readback, a resized surface, a lost device, dual carts, refusals, repeated
@@ -142,9 +145,9 @@ clean exits).
 ### Pre-built binaries
 
 Download from [Releases](https://github.com/wasmcart/wasmcart-native/releases) —
-Linux (x86_64/aarch64), macOS (x86_64/aarch64) and Windows x86_64. The Linux
-and macOS archives include WebGPU: keep the `wgpu/` directory beside
-`wasmcart-run`. The Windows build has no WebGPU (see "WebGPU support").
+Linux (x86_64/aarch64), macOS (x86_64/aarch64) and Windows (x86_64/aarch64).
+Every archive includes WebGPU: keep the `wgpu/` directory beside
+`wasmcart-run`.
 
 On Linux and macOS, if the binary arrives without its execute bit:
 
@@ -294,7 +297,7 @@ Determined by the cart's `gpu_api` field:
 |---------|------|-------------|
 | 0 | 2D framebuffer | SDL2 accelerated renderer + letterboxing |
 | 1 | WebGL2 / GLES3 | EGL window surface + FBO redirect + letterboxing |
-| 2 | WebGPU | WebGPU surface on the window (Wayland, X11, a CAMetalLayer on macOS; no WebGPU on Windows yet), the cart's frame drawn letterboxed. Selected by the cart's WebGPU imports; a cart importing both GPU APIs gets WebGPU when this build has it, else GL |
+| 2 | WebGPU | WebGPU surface on the window (Wayland, X11, a CAMetalLayer on macOS, a Win32 window on Windows), the cart's frame drawn letterboxed. Selected by the cart's WebGPU imports; a cart importing both GPU APIs gets WebGPU when this build has it, else GL |
 
 Any other `gpu_api`, and 2 with no WebGPU imports, is refused at load.
 

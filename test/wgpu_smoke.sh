@@ -13,7 +13,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN="${1:-$HERE/../build/wasmcart-run}"
 OUT="${TMPDIR:-/tmp}/wasmcart-wgpu-smoke.$$"
 mkdir -p "$OUT"
-export SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy
+# WGPU_SMOKE_VIDEODRIVER picks another SDL video driver: SDL's Windows build
+# has no offscreen driver, so Windows runs it on a real window (windows).
+export SDL_VIDEODRIVER="${WGPU_SMOKE_VIDEODRIVER:-offscreen}" SDL_AUDIODRIVER=dummy
 
 "$RUN" "$HERE/wgpu/wgpucart.wasc" --fixed-step 16 --shot 8 "$OUT/shot.ppm" > "$OUT/log" 2>&1 &
 pid=$!
