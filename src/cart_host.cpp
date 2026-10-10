@@ -2404,6 +2404,17 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     deliver_peers(host);        // then into the cart, at a known point
     deliver_text(host);         // before render, like every other input
     deliver_wheel(host);        // frame total in, zeroed again after render
+    // The host's WebGPU device lost: the cart cannot continue on it, so it is
+    // not run again; the player reads wc_host_gpu_lost and tells the user.
+    if (host->uses_wgpu && !host->gpu_lost) {
+        auto why = wgpu_call(host, "lost");
+        if (why->IsString()) {
+            v8::String::Utf8Value w(g_isolate, why);
+            host->gpu_lost = true;
+            snprintf(host->gpu_lost_msg, sizeof host->gpu_lost_msg, "%s", *w);
+        }
+    }
+    if (host->gpu_lost) return;
     if (host->uses_wgpu) wgpu_call(host, "begin");
 
     auto result = state->fn_wc_render.Get(g_isolate)->Call(
@@ -2530,6 +2541,9 @@ extern "C" uint8_t* wc_host_get_save_data(wc_host_t* host, uint32_t* size) {
 
 extern "C" bool wc_host_uses_gl(wc_host_t* host) { return host->uses_gl; }
 extern "C" bool wc_host_uses_wgpu(wc_host_t* host) { return host->uses_wgpu; }
+// "reason: message" once the host's WebGPU device was lost while the cart ran
+// (wc_render is no longer called), else NULL.
+extern "C" const char* wc_host_gpu_lost(wc_host_t* host) { return host->gpu_lost ? host->gpu_lost_msg : NULL; }
 
 // Present a WebGPU cart into a native window. kind is one of xlib, wayland,
 // win32, metal-layer (native-dawn's NativeSurface kinds); display and handle

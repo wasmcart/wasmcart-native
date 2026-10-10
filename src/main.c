@@ -926,6 +926,22 @@ int main(int argc, char* argv[]) {
             break;
         }
 
+        // The host's WebGPU device was lost: the cart cannot continue, so say
+        // so (a message box when there is a window to own it) and exit 4,
+        // rather than presenting black frames.
+        if (is_wgpu && wc_host_gpu_lost(host)) {
+            char msg[512];
+            snprintf(msg, sizeof msg, "The GPU device was lost (%s). The cart cannot continue; restart it to play again.",
+                     wc_host_gpu_lost(host));
+            fprintf(stderr, "wasmcart: %s\n", msg);
+            const char* drv = SDL_GetCurrentVideoDriver();
+            if (drv && strcmp(drv, "offscreen") != 0 && strcmp(drv, "dummy") != 0)
+                SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "wasmcart", msg, window);
+            exit_status = 4;
+            running = false;
+            break;
+        }
+
         if (g_should_quit) {
             running = false;
             break;

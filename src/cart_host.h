@@ -75,6 +75,10 @@ struct wc_host {
     // (SPEC.md, "Resolution changes", GPU carts) is re-read after wc_render.
     uint32_t info_ptr;
     bool size_warned;
+    // The host's WebGPU device was lost while the cart ran: wc_render is no
+    // longer called (wasmcart docs/webgpu.md, "Errors and device loss").
+    bool gpu_lost;
+    char gpu_lost_msg[256];
 
     // WASI threads: imports wasi.thread-spawn + exports wasi_thread_start
     bool threaded;

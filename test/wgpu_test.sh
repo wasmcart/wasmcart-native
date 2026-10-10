@@ -17,6 +17,8 @@
 #   wasicart     wgpucart built with wasi-sdk (wasip1-threads, two workers)
 #   wgpuedges    reconfigures its surface from 128x96 to 160x120 at frame 10
 #                and draws blue from then on
+#   wgpulost     destroys the host's device at frame 5, as a driver reset
+#                loses it
 #
 # Every run must also EXIT cleanly: teardown with GPU work in flight used to
 # abort or segfault in node::FreeEnvironment.
@@ -87,6 +89,12 @@ check "resized webgpu cart: shot is the new frame"    "$(pixel resized 150 110 2
 # Not checked: its exit status. wgpuedges requests a device of its own, and a
 # cart that did crashes in node::FreeEnvironment (a dawn.node finalizer) on
 # about half its exits, before and after this fix alike.
+
+# A lost device: the player stops the cart, says so and exits 4 by itself
+# (the shot at frame 30 is never reached).
+run wgpulost 30 lost
+has   "lost device: the player says so"               lost "The GPU device was lost (destroyed"
+check "lost device: exit status 4"                    "$(cat "$OUT/lost.status")" "4"
 
 run dualgpu 3 dual
 check "dual cart: WebGPU selected, green"              "$(pixel dual 64 48 2>/dev/null)" "0,255,0"
