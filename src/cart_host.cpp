@@ -2916,6 +2916,19 @@ extern "C" int wc_host_wgpu_read_frame(wc_host_t* host, uint8_t* out, uint32_t w
     data->CopyContents(out, (size_t)w * h * 4);
     return 0;
 }
+extern "C" int wc_host_wgpu_frame_size(wc_host_t* host, uint32_t* w, uint32_t* h) {
+    if (!host->uses_wgpu) return -1;
+    v8::Locker locker(g_isolate);
+    v8::Isolate::Scope isolate_scope(g_isolate);
+    v8::HandleScope hs(g_isolate);
+    v8::Context::Scope cs(ctx());
+    auto v = wgpu_call(host, "frameSize");
+    if (v.IsEmpty() || !v->IsObject()) return -1;
+    auto o = v.As<v8::Object>();
+    *w = o->Get(ctx(), v8str("width")).ToLocalChecked()->Uint32Value(ctx()).FromJust();
+    *h = o->Get(ctx(), v8str("height")).ToLocalChecked()->Uint32Value(ctx()).FromJust();
+    return (*w > 0 && *h > 0) ? 0 : -1;
+}
 extern "C" bool wc_host_has_trapped(wc_host_t* host) { return host->trapped; }
 extern "C" void wc_host_set_gl_loader(wc_host_t* host, wc_gl_get_proc_fn loader) { host->gl_loader = loader; }
 extern "C" const wc_cart_info_t* wc_host_get_cart_info(wc_host_t* host) { return &host->info; }

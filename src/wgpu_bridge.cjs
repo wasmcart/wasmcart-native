@@ -122,6 +122,15 @@ module.exports = function createBridge(dir) {
       return drew;
     },
 
+    // The size of the surface the cart renders into: what wc_get_info said at
+    // load can differ (an engine that lays out its own project size), and the
+    // real frame is this one. null before the cart has configured a surface.
+    frameSize(id) {
+      const c = sessions.get(id)?.session?.canvas;
+      const w = c ? c.width | 0 : 0, h = c ? c.height | 0 : 0;
+      return w > 0 && h > 0 ? { width: w, height: h } : null;
+    },
+
     // The cart's last frame as RGBA. value: { width, height, data }.
     read(id) {
       return job(() => sessions.get(id).session.readFrame());

@@ -1075,9 +1075,17 @@ int main(int argc, char* argv[]) {
 
         if (shot_path && (long)frame_count == shot_frame && is_wgpu) {
             const wc_cart_info_t* ci = wc_host_get_cart_info(host);
+            // The surface the cart really renders into, not wc_get_info's size
+            // (they differ for an engine that lays out its own project size).
             uint32_t rw = ci->width, rh = ci->height;
+            (void)wc_host_wgpu_frame_size(host, &rw, &rh);
             uint8_t* px = (uint8_t*)malloc((size_t)rw * rh * 4);
-            FILE* f = px && wc_host_wgpu_read_frame(host, px, rw, rh) == 0 ? fopen(shot_path, "wb") : NULL;
+            int rrc = px ? wc_host_wgpu_read_frame(host, px, rw, rh) : -1;
+            FILE* f = rrc == 0 ? fopen(shot_path, "wb") : NULL;
+            if (rrc != 0)
+                fprintf(stderr, "wasmcart: --shot: reading the WebGPU frame (%ux%u) failed, no file written\n", rw, rh);
+            else if (!f)
+                fprintf(stderr, "wasmcart: --shot: cannot write %s\n", shot_path);
             if (f) {
                 fprintf(f, "P6\n%u %u\n255\n", rw, rh);
                 for (size_t i = 0; i < (size_t)rw * rh; i++) fwrite(px + i * 4, 1, 3, f);  // top-down already
@@ -1099,8 +1107,10 @@ int main(int argc, char* argv[]) {
             int ww, wh;
             SDL_GetWindowSizeInPixels(window, &ww, &wh);
             const wc_cart_info_t* ci = wc_host_get_cart_info(host);
-            double s = fmin((double)ww / ci->width, (double)wh / ci->height);
-            int dw = (int)(ci->width * s), dh = (int)(ci->height * s);
+            uint32_t fw = ci->width, fh = ci->height;
+            (void)wc_host_wgpu_frame_size(host, &fw, &fh);   // the real surface
+            double s = fmin((double)ww / fw, (double)wh / fh);
+            int dw = (int)(fw * s), dh = (int)(fh * s);
             wc_host_wgpu_present(host, (ww - dw) / 2, (wh - dh) / 2, dw, dh, ww, wh);
         } else if (egl_is_initialized()) {
             // GL carts: blit redirect FBO to screen, then swap

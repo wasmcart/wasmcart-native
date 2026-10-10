@@ -440,6 +440,11 @@ int wc_host_wgpu_read_frame(wc_host_t* host, uint8_t* out, uint32_t w, uint32_t 
  * wc_host_run_frame no longer calls its wc_render. Tell the user rather than
  * presenting black (wasmcart docs/webgpu.md, "Errors and device loss"). */
 const char* wc_host_gpu_lost(wc_host_t* host);
+/* The size of the surface a WebGPU cart renders into. Prefer it to
+ * wc_get_info's width/height for sizing a readback or a letterbox: an engine
+ * may lay out its own project size. Returns 0 and fills w/h, or -1 (not a
+ * WebGPU cart, or no surface configured yet). */
+int wc_host_wgpu_frame_size(wc_host_t* host, uint32_t* w, uint32_t* h);
 // Set a function that resolves GL function names to pointers.
 // For standalone: use eglGetProcAddress. For libretro: use retro_hw_get_proc_address.
 typedef void* (*wc_gl_get_proc_fn)(const char* name);
