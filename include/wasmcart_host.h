@@ -391,6 +391,18 @@ void wc_host_input_device(wc_host_t* host, int player, int device, int pad_famil
 void wc_host_input_key(wc_host_t* host, int input, const char* label, int hid_scancode);
 // Remap an action for a player: an input id, -1 unbound, -2 back to the default.
 void wc_host_action_bind(wc_host_t* host, int player, int action, int input);
+// The cart's declared actions, for remap screens, help overlays and frontend
+// input descriptors. Fills up to max entries; returns how many exist.
+typedef struct {
+    char    name[65];       // UTF-8, as the cart declared it
+    char    set[65];        // the action set's name
+    int32_t set_id;
+    int32_t kind;           // 0 digital, 1 analog
+    int32_t default_input;  // the cart's default binding (input id, -1 none)
+    int32_t input;          // the binding in effect for this player
+    int32_t active;         // 1 if the set is the player's active one
+} wc_host_action_t;
+int wc_host_actions(wc_host_t* host, int player, wc_host_action_t* out, int max);
 // The embedder's own mapping changed in a way the calls above do not cover.
 void wc_host_input_changed(wc_host_t* host);
 

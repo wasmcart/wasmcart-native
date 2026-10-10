@@ -1238,6 +1238,7 @@ static const char WC_ACTIONS_HOST_JS[] = R"WCJS((function (lib, inputPtr) {
     key: (input, label, sc) => { (keys ||= {})[input] = [label, sc]; t.bump(); },
     bind: (p, a, i) => t.setBinding(p, a, i === -2 ? undefined : i === -1 ? null : i),
     bump: () => t.bump(),
+    list: (p) => t.list(p),
   };
 }))WCJS";
 
@@ -1307,6 +1308,42 @@ extern "C" void wc_host_action_bind(wc_host_t* host, int player, int action, int
     WC_ACTIONS_SCOPE();
     v8::Local<v8::Value> a[] = { v8int(player), v8int(action), v8int(input) };
     actions_call(host, "bind", 3, a);
+}
+
+extern "C" int wc_host_actions(wc_host_t* host, int player, wc_host_action_t* out, int max) {
+    if (!host || !host->v8_state) return 0;
+    v8::Locker locker(g_isolate);
+    v8::Isolate::Scope isolate_scope(g_isolate);
+    v8::HandleScope handle_scope(g_isolate);
+    v8::Context::Scope context_scope(ctx());
+    auto state = (v8_host_state*)host->v8_state;
+    if (state->actions.IsEmpty()) return 0;
+    auto obj = state->actions.Get(g_isolate);
+    v8::TryCatch tc(g_isolate);
+    v8::Local<v8::Value> fn, res;
+    v8::Local<v8::Value> a[] = { v8::Integer::New(g_isolate, player) };
+    if (!obj->Get(ctx(), v8str("list")).ToLocal(&fn) || !fn->IsFunction() ||
+        !fn.As<v8::Function>()->Call(ctx(), obj, 1, a).ToLocal(&res) || !res->IsArray())
+        return 0;
+    auto arr = res.As<v8::Array>();
+    int n = (int)arr->Length();
+    for (int i = 0; i < n && i < max && out; i++) {
+        auto e = arr->Get(ctx(), i).ToLocalChecked().As<v8::Object>();
+        auto num = [&](const char* k) { return e->Get(ctx(), v8str(k)).ToLocalChecked()->Int32Value(ctx()).FromMaybe(0); };
+        auto str = [&](const char* k, char* dst, size_t cap) {
+            v8::String::Utf8Value u(g_isolate, e->Get(ctx(), v8str(k)).ToLocalChecked());
+            snprintf(dst, cap, "%s", *u ? *u : "");
+        };
+        str("name", out[i].name, sizeof out[i].name);
+        str("setName", out[i].set, sizeof out[i].set);
+        out[i].set_id = num("set");
+        v8::String::Utf8Value kind(g_isolate, e->Get(ctx(), v8str("kind")).ToLocalChecked());
+        out[i].kind = (*kind && strcmp(*kind, "analog") == 0) ? 1 : 0;
+        out[i].default_input = num("defaultInput");
+        out[i].input = num("input");
+        out[i].active = e->Get(ctx(), v8str("active")).ToLocalChecked()->BooleanValue(g_isolate) ? 1 : 0;
+    }
+    return n;
 }
 
 extern "C" void wc_host_input_changed(wc_host_t* host) {
