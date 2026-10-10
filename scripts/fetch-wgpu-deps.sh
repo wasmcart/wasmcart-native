@@ -7,7 +7,7 @@
 #   sh scripts/fetch-wgpu-deps.sh TARGET DEST
 #
 # TARGET is native-dawn's name for the platform: linux-x64, linux-arm64,
-# darwin-x64, darwin-arm64, win32-x64, win32-arm64. Versions come from
+# darwin-x64, darwin-arm64, win32-x64. Versions come from
 # NATIVE_DAWN_VERSION and WASMCART_VERSION (the workflow pins both).
 # WASMCART_SPEC overrides where wasmcart comes from (anything `npm pack`
 # accepts, e.g. a local checkout); the package it yields must still be
@@ -28,7 +28,6 @@ case "$NATIVE_DAWN_VERSION-$TARGET" in
   0.1.2-darwin-x64)   SHA=c1178f6bb7c2d6ab09682202a2432f26604ec68b79ff0facf4179f5b8de3eab7 ;;
   0.1.2-darwin-arm64) SHA=8181ad3ed1819ca4c02440cf5a3419a92d0e18d59334fce6bfba622120422058 ;;
   0.1.2-win32-x64)    SHA=1b9d13cf65a946895e5a758a545da408ae9b1c8caa2f1fba809bfb02c10ffe04 ;;
-  0.1.2-win32-arm64)  SHA=0a776fd111c7752eda1aa202b80d8cb58db8a3e1dc6d72680f5774394c70ff88 ;;
   *) echo "fetch-wgpu-deps: no pinned sha256 for native-dawn $NATIVE_DAWN_VERSION $TARGET" >&2; exit 1 ;;
 esac
 case "$TARGET" in

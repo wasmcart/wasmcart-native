@@ -107,7 +107,7 @@ cmake .. -DWASMCART_WGPU_JS_DIR=<wasmcart 0.32.0 or later>/src/wgpu \
 
 `scripts/fetch-wgpu-deps.sh <target> <dir>` fetches both the way the release
 builds do: native-dawn's release archive for `linux-x64`, `linux-arm64`,
-`darwin-x64`, `darwin-arm64`, `win32-x64` or `win32-arm64` (sha256 pinned in
+`darwin-x64`, `darwin-arm64` or `win32-x64` (sha256 pinned in
 the script) into
 `<dir>/native-dawn`, and the wasmcart npm package into `<dir>/wasmcart`.
 
@@ -145,7 +145,7 @@ clean exits).
 ### Pre-built binaries
 
 Download from [Releases](https://github.com/wasmcart/wasmcart-native/releases) —
-Linux (x86_64/aarch64), macOS (x86_64/aarch64) and Windows (x86_64/aarch64).
+Linux (x86_64/aarch64), macOS (x86_64/aarch64) and Windows (x86_64).
 Every archive includes WebGPU: keep the `wgpu/` directory beside
 `wasmcart-run`.
 
