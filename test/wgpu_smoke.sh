@@ -22,7 +22,21 @@ pid=$!
 i=0
 while [ $i -lt 240 ] && kill -0 $pid 2>/dev/null && [ ! -f "$OUT/shot.ppm" ]; do sleep 0.25; i=$((i + 1)); done
 sleep 0.3
-kill -INT $pid 2>/dev/null
+# Ask the player to quit as a user would, so a clean exit is 0. Git Bash
+# cannot deliver SIGINT to a native Windows program: close its window instead
+# (taskkill without /F posts WM_CLOSE, which SDL turns into SDL_QUIT).
+if [ -r "/proc/$pid/winpid" ]; then
+  taskkill //PID "$(cat /proc/$pid/winpid)" > /dev/null 2>&1
+else
+  kill -INT $pid 2>/dev/null
+fi
+# Never hang the job: a player that ignores the request is killed and fails.
+i=0
+while [ $i -lt 80 ] && kill -0 $pid 2>/dev/null; do sleep 0.25; i=$((i + 1)); done
+if kill -0 $pid 2>/dev/null; then
+  kill -9 $pid 2>/dev/null
+  echo "FAIL: the player did not exit when asked to quit"
+fi
 wait $pid
 status=$?
 
