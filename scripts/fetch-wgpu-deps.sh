@@ -22,23 +22,14 @@ DEST=$2
 # files on github.com/monteslu/native-dawn/releases/tag/v<version> when the
 # version is bumped. They live here, not fetched from the release, so a
 # release asset replaced after the fact cannot change what gets built.
-#
-# PLACEHOLDER: native-dawn 0.1.2 (the first whose Windows dawn.node loads
-# outside node.exe) is not released yet. Fill these in from its .sha256 files
-# before pushing this repo; until then every WebGPU fetch stops here.
 case "$NATIVE_DAWN_VERSION-$TARGET" in
-  0.1.2-linux-x64)    SHA=PLACEHOLDER-native-dawn-0.1.2-unreleased ;;
-  0.1.2-linux-arm64)  SHA=PLACEHOLDER-native-dawn-0.1.2-unreleased ;;
-  0.1.2-darwin-x64)   SHA=PLACEHOLDER-native-dawn-0.1.2-unreleased ;;
-  0.1.2-darwin-arm64) SHA=PLACEHOLDER-native-dawn-0.1.2-unreleased ;;
-  0.1.2-win32-x64)    SHA=PLACEHOLDER-native-dawn-0.1.2-unreleased ;;
-  0.1.2-win32-arm64)  SHA=PLACEHOLDER-native-dawn-0.1.2-unreleased ;;
+  0.1.2-linux-x64)    SHA=101b160cbc4f2912d94d8d9da1ea1ff85146b203a71970fd8de42d3dd5ce1d7f ;;
+  0.1.2-linux-arm64)  SHA=49511d97293efbfe5e38f63f9ae23e768896fd53ae81fe57b744b3dff8e5472b ;;
+  0.1.2-darwin-x64)   SHA=c1178f6bb7c2d6ab09682202a2432f26604ec68b79ff0facf4179f5b8de3eab7 ;;
+  0.1.2-darwin-arm64) SHA=8181ad3ed1819ca4c02440cf5a3419a92d0e18d59334fce6bfba622120422058 ;;
+  0.1.2-win32-x64)    SHA=1b9d13cf65a946895e5a758a545da408ae9b1c8caa2f1fba809bfb02c10ffe04 ;;
+  0.1.2-win32-arm64)  SHA=0a776fd111c7752eda1aa202b80d8cb58db8a3e1dc6d72680f5774394c70ff88 ;;
   *) echo "fetch-wgpu-deps: no pinned sha256 for native-dawn $NATIVE_DAWN_VERSION $TARGET" >&2; exit 1 ;;
-esac
-case "$SHA" in
-  PLACEHOLDER*)
-    echo "fetch-wgpu-deps: the sha256 for native-dawn $NATIVE_DAWN_VERSION $TARGET is a placeholder; pin it from the release's .sha256 file (scripts/fetch-wgpu-deps.sh)" >&2
-    exit 1 ;;
 esac
 case "$TARGET" in
   win32-*) DAWN_NODE=native-dawn/bin/dawn.node ;;
