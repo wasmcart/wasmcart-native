@@ -200,6 +200,7 @@ if(WASMCART_WGPU_JS_DIR AND NATIVE_DAWN_DIR)
             "${WGPU_OUT}/"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${WASMCART_WGPU_JS_DIR}/host.js"
+            "${WASMCART_WGPU_JS_DIR}/release.js"
             "${WASMCART_WGPU_JS_DIR}/glue-loader.js"
             "${WASMCART_WGPU_JS_DIR}/emdawnwebgpu-glue.mjs"
             "${WASMCART_WGPU_JS_DIR}/emdawnwebgpu-glue-manifest.js"

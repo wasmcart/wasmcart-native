@@ -18,6 +18,10 @@
 #   gpuapi2/3    gpu_api values the cart does not back; refused
 #   wgpufake     imports a WebGPU function the glue lacks; refused
 #   wasicart     wgpucart built with wasi-sdk (wasip1-threads, two workers)
+#   wgpuedges    reconfigures its surface from 128x96 to 160x120 at frame 10
+#                and draws blue from then on
+#   wgpulost     destroys the host's device at frame 5, as a driver reset
+#                loses it
 #
 # Every run must also EXIT cleanly: teardown with GPU work in flight used to
 # abort or segfault in node::FreeEnvironment.
@@ -91,6 +95,20 @@ check "malloc-only WebGPU cart: exits without crashing"     "$(cat "$OUT/old031.
 run wgpucart 3 lowpower WASMCART_WGPU_POWER=low-power
 has   "WASMCART_WGPU_POWER reaches the adapter request"     lowpower "compatibility, low-power)"
 
+# A shot after the cart resized its surface: the host adopts the size the cart
+# wrote into wc_info_t, so the frame is read (it used to never be written and
+# the run had to be killed).
+run wgpuedges 12 resized
+check "resized webgpu cart: shot is the new size"     "$(head -c 15 "$OUT/resized.ppm" 2>/dev/null | tr '\n' ' ')" "P6 160 120 255 "
+check "resized webgpu cart: shot is the new frame"    "$(pixel resized 150 110 2>/dev/null)" "0,0,255"
+check "resized webgpu cart: clean exit"               "$(cat "$OUT/resized.status")" "0"
+
+# A lost device: the player stops the cart, says so and exits 4 by itself
+# (the shot at frame 30 is never reached).
+run wgpulost 30 lost
+has   "lost device: the player says so"               lost "The GPU device was lost (destroyed"
+check "lost device: exit status 4"                    "$(cat "$OUT/lost.status")" "4"
+
 run dualgpu 3 dual
 check "dual cart: WebGPU selected, green"              "$(pixel dual 64 48 2>/dev/null)" "0,255,0"
 check "dual cart: clean exit"                          "$(cat "$OUT/dual.status")" "0"
@@ -126,6 +144,19 @@ while [ $k -lt 8 ]; do
   k=$((k + 1))
 done
 check "8 more runs exit cleanly" "$crashes" "0"
+
+# A cart that requested a device of its own (wgpuedges), repeated: its device's
+# wrapper outlives the cart and is finalized when Node's environment is freed
+# at exit; that used to happen after dawn.node's own statics were gone and
+# crashed about one exit in two.
+crashes=0
+k=0
+while [ $k -lt 20 ]; do
+  run wgpuedges 3 ownloop
+  [ "$(cat "$OUT/ownloop.status")" = "0" ] || crashes=$((crashes + 1))
+  k=$((k + 1))
+done
+check "20 runs of a cart with its own device exit cleanly" "$crashes" "0"
 
 rm -rf "$OUT"
 [ $fail -eq 0 ] && echo "all wgpu checks passed"

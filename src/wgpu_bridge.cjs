@@ -50,18 +50,28 @@ module.exports = function createBridge(dir) {
         if (!adapter) throw new Error('no WebGPU adapter is available (check the GPU driver)');
         const a = host.describeAdapter(adapter, adapterOptions);
         process.stderr.write(`wasmcart-run: WebGPU on ${a.device || a.description} (${a.vendor}, ${a.featureLevel}${a.powerPreference ? ', ' + a.powerPreference : ''})\n`);
-        const session = await host.createWgpuSession({
+        const rec = { session: null, surface: null, size: [0, 0], lost: null };
+        rec.session = await host.createWgpuSession({
           moduleImports: WebAssembly.Module.imports(module), gpu, adapter, width, height,
           globals: dawn.globals,
           log: msg => process.stderr.write(msg + '\n'),
+          onLost: info => { rec.lost = info; },
         });
-        sessions.set(id, { session, surface: null, size: [0, 0] });
+        sessions.set(id, rec);
+        const { session } = rec;
         return session.env;
       });
     },
 
     attach(id, instance, memory) {
       return job(() => sessions.get(id).session.attach(instance, memory));
+    },
+
+    // "reason: message" once the host's device was lost while the cart ran
+    // (wasmcart's session reports it; the host then stops calling wc_render).
+    lost(id) {
+      const l = sessions.get(id)?.lost;
+      return l ? l.reason + (l.message ? ': ' + l.message : '') : null;
     },
 
     begin(id) {

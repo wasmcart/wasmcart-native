@@ -113,13 +113,19 @@ Without it the player has no WebGPU: a WebGPU-only cart is refused at load
 with that reason, and a cart that also imports GL runs on GL (which is how
 the libretro and Android builds behave today).
 
+If the GPU device is lost while a WebGPU cart runs (a driver reset, the GPU
+removed), the cart cannot continue: the player stops running it, prints the
+reason, shows a message box when it has a window, and exits with status 4
+(wasmcart docs/webgpu.md, "Errors and device loss").
+
 The executable exports Node-API and libuv symbols (`-Wl,--dynamic-list`) so
 `dawn.node` can load at all; libnode is linked statically and its symbols are
 otherwise hidden. Linux only so far: macOS and Windows need their own export
 and window-surface code.
 
 `test/wgpu_test.sh` runs the WebGPU fixtures headless (render, compute
-readback, dual carts, refusals, repeated clean exits).
+readback, a resized surface, a lost device, dual carts, refusals, repeated
+clean exits).
 
 ### Pre-built binaries
 

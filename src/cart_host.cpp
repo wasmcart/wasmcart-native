@@ -277,6 +277,7 @@ static int check_abi_version(wc_host_t* host) {
 static void parse_cart_info(wc_host_t* host, uint32_t info_ptr) {
     uint8_t* mem = host->memory;
     wc_cart_info_t* info = &host->info;
+    host->info_ptr = info_ptr;
 
     info->version        = wc_read_u32(mem, info_ptr + WC_INFO_VERSION);
     info->width          = wc_read_u32(mem, info_ptr + WC_INFO_WIDTH);
@@ -1441,6 +1442,26 @@ static void threads_shutdown(wc_host_t* host) {
 static void pump_node(wc_host_t* host);
 
 static v8::Global<v8::Object> g_wgpu_bridge;
+
+// Free Node's environment at exit while dawn.node is still intact.
+//
+// g_setup is a static of this program, so its destructor (which runs
+// node::FreeEnvironment, finalizing every wrapper still alive) is registered
+// at startup and runs LAST at exit, after the static destructors of
+// dawn.node, which registers its own when it is loaded. A wrapper still alive
+// then (a GPUDevice the cart requested, kept by the cart's glue until the
+// environment goes) is finalized against dawn.node's already destroyed
+// device map (GPUDevice::~GPUDevice erases from a static unordered_map), and
+// the player segfaulted on about half the exits of such a cart. An atexit
+// handler registered after dawn.node is loaded runs before its destructors.
+static void free_node_before_dawn(void) {
+    if (!g_setup) return;
+    {
+        v8::Locker locker(g_isolate);
+        g_wgpu_bridge.Reset();
+    }
+    g_setup.reset();
+}
 static std::string g_wgpu_unavailable;
 static bool g_wgpu_probed = false;
 
@@ -1498,7 +1519,10 @@ static v8::Local<v8::Object> wgpu_bridge() {
             "  try { return __wc_require('node:module').createRequire(p.join(dir, 'wgpu_bridge.cjs'))(p.join(dir, 'wgpu_bridge.cjs'))(dir); }"
             "  catch (e) { return 'loading WebGPU support from ' + dir + ' failed: ' + e.message; }"
             "})", 1, argv);
-        if (r->IsObject()) g_wgpu_bridge.Reset(g_isolate, r.As<v8::Object>());
+        if (r->IsObject()) {
+            g_wgpu_bridge.Reset(g_isolate, r.As<v8::Object>());
+            atexit(free_node_before_dawn);  // dawn.node is loaded now
+        }
         else if (r->IsString()) { v8::String::Utf8Value s(g_isolate, r); g_wgpu_unavailable = *s; }
         else g_wgpu_unavailable = "loading WebGPU support failed";
     }
@@ -2672,6 +2696,17 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     deliver_text(host);         // before render, like every other input
     deliver_wheel(host);        // frame total in, zeroed again after render
     if (host->trapped) return;  // a payload the cart could not take (wc_cart_alloc)
+    // The host's WebGPU device lost: the cart cannot continue on it, so it is
+    // not run again; the player reads wc_host_gpu_lost and tells the user.
+    if (host->uses_wgpu && !host->gpu_lost) {
+        auto why = wgpu_call(host, "lost");
+        if (why->IsString()) {
+            v8::String::Utf8Value w(g_isolate, why);
+            host->gpu_lost = true;
+            snprintf(host->gpu_lost_msg, sizeof host->gpu_lost_msg, "%s", *w);
+        }
+    }
+    if (host->gpu_lost) return;
     if (host->uses_wgpu) {
         // A WebGPU callback that could not get cart memory (no wc_alloc, or it
         // failed) ran inside Node's event loop, where a throw reaches no
@@ -2697,6 +2732,24 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     }
 
     refresh_memory(host);
+
+    // A WebGPU cart changes size by reconfiguring its surface and writing the
+    // new size into wc_info_t (SPEC.md, "Resolution changes", GPU carts): adopt
+    // it, so presenting and --shot read the frame at the size it now has.
+    if (host->uses_wgpu && host->memory && host->info_ptr
+        && (uint64_t)host->info_ptr + WC_INFO_HEIGHT + 4 <= host->memory_size) {
+        uint32_t w = wc_read_u32(host->memory, host->info_ptr + WC_INFO_WIDTH);
+        uint32_t h = wc_read_u32(host->memory, host->info_ptr + WC_INFO_HEIGHT);
+        if (w != host->info.width || h != host->info.height) {
+            if (w >= 1 && h >= 1 && w <= 16384 && h <= 16384) {
+                host->info.width = w;
+                host->info.height = h;
+            } else if (!host->size_warned) {
+                host->size_warned = true;
+                wc_log("wasmcart: ignoring the cart's new size %ux%u (keeping %ux%u)\n", w, h, host->info.width, host->info.height);
+            }
+        }
+    }
 
     // Clear AFTER the frame, not before: the cart has now read the total, and
     // leaving it set would scroll forever off a single flick.
@@ -2805,6 +2858,9 @@ extern "C" uint8_t* wc_host_get_save_data(wc_host_t* host, uint32_t* size) {
 
 extern "C" bool wc_host_uses_gl(wc_host_t* host) { return host->uses_gl; }
 extern "C" bool wc_host_uses_wgpu(wc_host_t* host) { return host->uses_wgpu; }
+// "reason: message" once the host's WebGPU device was lost while the cart ran
+// (wc_render is no longer called), else NULL.
+extern "C" const char* wc_host_gpu_lost(wc_host_t* host) { return host->gpu_lost ? host->gpu_lost_msg : NULL; }
 
 // Present a WebGPU cart into a native window. kind is one of xlib, wayland,
 // win32, metal-layer (native-dawn's NativeSurface kinds); display and handle
