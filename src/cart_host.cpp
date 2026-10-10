@@ -2456,13 +2456,26 @@ extern "C" const void* wc_host_get_audio(wc_host_t* host, uint32_t* num_frames, 
 
     if (write_cursor == read_cursor) { *num_frames = 0; return NULL; }
 
+    // The cart's cursor may run free (wc_pcm_mixer: indices are cursor % cap)
+    // or wrap at cap. A cursor that moved backwards past a wrap is neither: a
+    // save state was written back, so resync instead of reading ~2^32 frames.
     uint32_t available;
     if (write_cursor >= read_cursor)
         available = write_cursor - read_cursor;
-    else
+    else if (read_cursor < cap)
         available = cap - read_cursor + write_cursor;
+    else {
+        host->audio_read_cursor = write_cursor;
+        *num_frames = 0;
+        return NULL;
+    }
 
     if (available == 0) { *num_frames = 0; return NULL; }
+    // The ring holds at most cap frames; anything older was overwritten.
+    if (available > cap) {
+        read_cursor += available - cap;
+        available = cap;
+    }
 
     uint32_t needed = available * 2;
 
