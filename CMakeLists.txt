@@ -184,6 +184,16 @@ if(WASMCART_WGPU_JS_DIR AND NATIVE_DAWN_DIR)
     # wasmcart's JS keeps its own layout (src/wgpu/ beside src/cartMemory.js,
     # which host.js imports as ../cartMemory.js); wasmcart before 0.32 has no
     # cartMemory.js.
+    # native-dawn's layout (its paths.js): dawn.node beside Dawn's library,
+    # in bin/ on Windows (with the DXC DLLs Dawn loads) and lib/ elsewhere.
+    if(WIN32)
+        set(WGPU_DAWN_FILES "${NATIVE_DAWN_DIR}/bin/dawn.node" "${NATIVE_DAWN_DIR}/bin/webgpu_dawn.dll"
+            "${NATIVE_DAWN_DIR}/bin/dxcompiler.dll" "${NATIVE_DAWN_DIR}/bin/dxil.dll")
+    elseif(APPLE)
+        set(WGPU_DAWN_FILES "${NATIVE_DAWN_DIR}/lib/dawn.node" "${NATIVE_DAWN_DIR}/lib/libwebgpu_dawn.dylib")
+    else()
+        set(WGPU_DAWN_FILES "${NATIVE_DAWN_DIR}/lib/dawn.node" "${NATIVE_DAWN_DIR}/lib/libwebgpu_dawn.so")
+    endif()
     set(WGPU_SHARED_JS "")
     if(EXISTS "${WASMCART_WGPU_JS_DIR}/../cartMemory.js")
         set(WGPU_SHARED_JS COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -195,8 +205,7 @@ if(WASMCART_WGPU_JS_DIR AND NATIVE_DAWN_DIR)
         COMMAND ${CMAKE_COMMAND} -E make_directory "${WGPU_OUT}/src/wgpu"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/src/wgpu_bridge.cjs"
-            "${NATIVE_DAWN_DIR}/lib/dawn.node"
-            "${NATIVE_DAWN_DIR}/lib/libwebgpu_dawn.so"
+            ${WGPU_DAWN_FILES}
             "${WGPU_OUT}/"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${WASMCART_WGPU_JS_DIR}/host.js"
@@ -213,7 +222,11 @@ endif()
 
 # Native addons (dawn.node above) resolve N-API and libuv from the process
 # that loads them. libnode is linked statically, so its symbols are inside
-# this executable but not exported until listed here.
+# this executable but not exported until listed here. A macOS executable
+# exports its global symbols already (dawn.node finds them through
+# -undefined dynamic_lookup), so strip it with `strip -x`, which keeps them.
+# Windows: native-dawn's dawn.node imports N-API from a module named node.exe,
+# which this executable is not, so it cannot load there (README).
 if(UNIX AND NOT APPLE)
     file(WRITE "${CMAKE_BINARY_DIR}/node-api-exports.list" "{ napi_*; node_api_*; uv_*; };\n")
     target_link_options(wasmcart-run PRIVATE "-Wl,--dynamic-list=${CMAKE_BINARY_DIR}/node-api-exports.list")

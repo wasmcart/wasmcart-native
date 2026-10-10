@@ -628,6 +628,14 @@ int main(int argc, char* argv[]) {
     if (fullscreen) win_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     // Don't use SDL_WINDOW_OPENGL — EGL provides our GL context, not SDL
     // SDL_WINDOW_OPENGL would make SDL create a competing GLX context
+#ifdef __APPLE__
+    // A WebGPU cart presents through a CAMetalLayer (SDL_Metal_CreateView
+    // below). SDL marks a macOS window OpenGL unless it is created Metal, and
+    // refuses a Metal view on an OpenGL window; only the cocoa driver has Metal
+    // (the offscreen driver would refuse to create the window).
+    if (is_wgpu && SDL_GetCurrentVideoDriver() && strcmp(SDL_GetCurrentVideoDriver(), "cocoa") == 0)
+        win_flags |= SDL_WINDOW_METAL;
+#endif
 
     char title[300];
     snprintf(title, sizeof(title), "wasmcart - %s", manifest->name);
@@ -675,6 +683,16 @@ int main(int argc, char* argv[]) {
                     (uint64_t)(uintptr_t)wm_info.info.win.hinstance, (uint64_t)(uintptr_t)wm_info.info.win.window, !uncapped);
 #endif
         }
+#ifdef __APPLE__
+        // macOS: Dawn presents into a CAMetalLayer; SDL makes one in a view
+        // over the window's content.
+        if (attached != 0 && (SDL_GetWindowFlags(window) & SDL_WINDOW_METAL)) {
+            SDL_MetalView view = SDL_Metal_CreateView(window);
+            void* layer = view ? SDL_Metal_GetLayer(view) : NULL;
+            if (layer)
+                attached = wc_host_wgpu_attach_window(host, "metal-layer", 0, (uint64_t)(uintptr_t)layer, !uncapped);
+        }
+#endif
         fprintf(stderr, attached == 0 ? "wasmcart: rendering %ux%u via WebGPU\n"
                                       : "wasmcart: rendering %ux%u via WebGPU, no window surface (nothing presented)\n",
                 cart_w, cart_h);

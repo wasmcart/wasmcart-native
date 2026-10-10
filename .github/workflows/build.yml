@@ -9,6 +9,14 @@ on:
 
 env:
   LIBNODE_VERSION: v26.3.0-jsg9
+  # WebGPU (Linux and macOS jobs): native-dawn's release archive for the
+  # platform (sha256 pinned in scripts/fetch-wgpu-deps.sh) and wasmcart's
+  # src/wgpu from its npm package, exactly this version. RELEASE ORDER: the
+  # wasmcart release (v$WASMCART_VERSION pushed and published to npm) comes
+  # first; only then push/tag this repo, or the WebGPU jobs fail at "Fetch
+  # WebGPU support" because `npm pack wasmcart@$WASMCART_VERSION` finds nothing.
+  NATIVE_DAWN_VERSION: 0.1.1
+  WASMCART_VERSION: 0.32.0
 
 jobs:
   build-linux-x86_64:
@@ -21,13 +29,20 @@ jobs:
             libsdl2-dev libegl-dev libgles-dev \
             libasound2-dev libpulse-dev libsamplerate0-dev \
             libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev \
-            libwayland-dev libxkbcommon-dev libdecor-0-dev libdrm-dev libgbm-dev
+            libwayland-dev libxkbcommon-dev libdecor-0-dev libdrm-dev libgbm-dev \
+            mesa-vulkan-drivers
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
           curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-linux-x86_64.tar.gz | tar xz -C deps/libnode
+      - name: Fetch WebGPU support
+        run: sh scripts/fetch-wgpu-deps.sh linux-x64 deps/wgpu
       - name: Build
-        run: mkdir build && cd build && cmake .. && make -j$(nproc)
+        run: |
+          mkdir build && cd build
+          cmake .. -DWASMCART_WGPU_JS_DIR=$GITHUB_WORKSPACE/deps/wgpu/wasmcart/src/wgpu \
+                   -DNATIVE_DAWN_DIR=$GITHUB_WORKSPACE/deps/wgpu/native-dawn
+          make -j$(nproc)
       - name: Smoke test
         run: |
           # V8 + WASM init test — SDL will fail (no display) but cart should load
@@ -63,10 +78,15 @@ jobs:
             cat /tmp/smoke.log
             exit 1
           fi
+      # The full WebGPU suite on the stripped binary that ships. The runner
+      # has no GPU: mesa-vulkan-drivers (above) brings lavapipe, a software
+      # Vulkan driver, which Dawn uses as its adapter.
+      - name: WebGPU tests
+        run: sh test/wgpu_test.sh build/wasmcart-run
       - name: Package
         run: |
           strip build/wasmcart-run || true   # already stripped in Smoke test
-          tar czf wasmcart-native-linux-x86_64.tar.gz -C build wasmcart-run
+          tar czf wasmcart-native-linux-x86_64.tar.gz -C build wasmcart-run wgpu
       - uses: actions/upload-artifact@v7
         with:
           name: wasmcart-native-linux-x86_64
@@ -82,13 +102,20 @@ jobs:
             libsdl2-dev libegl-dev libgles-dev \
             libasound2-dev libpulse-dev libsamplerate0-dev \
             libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev \
-            libwayland-dev libxkbcommon-dev libdecor-0-dev libdrm-dev libgbm-dev
+            libwayland-dev libxkbcommon-dev libdecor-0-dev libdrm-dev libgbm-dev \
+            mesa-vulkan-drivers
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
           curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-linux-aarch64.tar.gz | tar xz -C deps/libnode
+      - name: Fetch WebGPU support
+        run: sh scripts/fetch-wgpu-deps.sh linux-arm64 deps/wgpu
       - name: Build
-        run: mkdir build && cd build && cmake .. && make -j$(nproc)
+        run: |
+          mkdir build && cd build
+          cmake .. -DWASMCART_WGPU_JS_DIR=$GITHUB_WORKSPACE/deps/wgpu/wasmcart/src/wgpu \
+                   -DNATIVE_DAWN_DIR=$GITHUB_WORKSPACE/deps/wgpu/native-dawn
+          make -j$(nproc)
       - name: Smoke test
         run: |
           # A plain kill+wait is NOT enough here: libnode/V8 can still be
@@ -123,10 +150,15 @@ jobs:
             cat /tmp/smoke.log
             exit 1
           fi
+      # The full WebGPU suite on the stripped binary that ships. The runner
+      # has no GPU: mesa-vulkan-drivers (above) brings lavapipe, a software
+      # Vulkan driver, which Dawn uses as its adapter.
+      - name: WebGPU tests
+        run: sh test/wgpu_test.sh build/wasmcart-run
       - name: Package
         run: |
           strip build/wasmcart-run || true   # already stripped in Smoke test
-          tar czf wasmcart-native-linux-aarch64.tar.gz -C build wasmcart-run
+          tar czf wasmcart-native-linux-aarch64.tar.gz -C build wasmcart-run wgpu
       - uses: actions/upload-artifact@v7
         with:
           name: wasmcart-native-linux-aarch64
@@ -148,11 +180,18 @@ jobs:
         run: |
           mkdir -p deps/libnode
           curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-macos-x86_64.tar.gz | tar xz -C deps/libnode
+      - name: Fetch WebGPU support
+        run: sh scripts/fetch-wgpu-deps.sh darwin-x64 deps/wgpu
       - name: Build
         run: |
           mkdir build && cd build
-          cmake .. -DANGLE_DIR=../deps/angle
+          cmake .. -DANGLE_DIR=../deps/angle \
+                   -DWASMCART_WGPU_JS_DIR=$GITHUB_WORKSPACE/deps/wgpu/wasmcart/src/wgpu \
+                   -DNATIVE_DAWN_DIR=$GITHUB_WORKSPACE/deps/wgpu/native-dawn
           make -j$(sysctl -n hw.ncpu)
+          # -x: local symbols only. dawn.node resolves N-API from this
+          # executable's exported globals, which a plain strip removes.
+          strip -x wasmcart-run
       - name: Smoke test
         run: |
           cp deps/angle/lib/*.dylib build/
@@ -165,10 +204,14 @@ jobs:
             cat /tmp/smoke.log
             exit 1
           fi
+      # The runner may have no Metal device Dawn can use: this checks that the
+      # stripped binary loads its wgpu/ support (dawn.node + Dawn) and, when
+      # an adapter exists, renders a WebGPU cart (test/wgpu_smoke.sh).
+      - name: WebGPU smoke test
+        run: sh test/wgpu_smoke.sh build/wasmcart-run
       - name: Package
         run: |
-          strip build/wasmcart-run
-          tar czf wasmcart-native-macos-x86_64.tar.gz -C build wasmcart-run libEGL.dylib libGLESv2.dylib
+          tar czf wasmcart-native-macos-x86_64.tar.gz -C build wasmcart-run libEGL.dylib libGLESv2.dylib wgpu
       - uses: actions/upload-artifact@v7
         with:
           name: wasmcart-native-macos-x86_64
@@ -189,11 +232,18 @@ jobs:
         run: |
           mkdir -p deps/libnode
           curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-macos-aarch64.tar.gz | tar xz -C deps/libnode
+      - name: Fetch WebGPU support
+        run: sh scripts/fetch-wgpu-deps.sh darwin-arm64 deps/wgpu
       - name: Build
         run: |
           mkdir build && cd build
-          cmake .. -DANGLE_DIR=../deps/angle
+          cmake .. -DANGLE_DIR=../deps/angle \
+                   -DWASMCART_WGPU_JS_DIR=$GITHUB_WORKSPACE/deps/wgpu/wasmcart/src/wgpu \
+                   -DNATIVE_DAWN_DIR=$GITHUB_WORKSPACE/deps/wgpu/native-dawn
           make -j$(sysctl -n hw.ncpu)
+          # -x: local symbols only. dawn.node resolves N-API from this
+          # executable's exported globals, which a plain strip removes.
+          strip -x wasmcart-run
       - name: Smoke test
         run: |
           cp deps/angle/lib/*.dylib build/
@@ -206,10 +256,14 @@ jobs:
             cat /tmp/smoke.log
             exit 1
           fi
+      # The runner may have no Metal device Dawn can use: this checks that the
+      # stripped binary loads its wgpu/ support (dawn.node + Dawn) and, when
+      # an adapter exists, renders a WebGPU cart (test/wgpu_smoke.sh).
+      - name: WebGPU smoke test
+        run: sh test/wgpu_smoke.sh build/wasmcart-run
       - name: Package
         run: |
-          strip build/wasmcart-run
-          tar czf wasmcart-native-macos-aarch64.tar.gz -C build wasmcart-run libEGL.dylib libGLESv2.dylib
+          tar czf wasmcart-native-macos-aarch64.tar.gz -C build wasmcart-run libEGL.dylib libGLESv2.dylib wgpu
       - uses: actions/upload-artifact@v7
         with:
           name: wasmcart-native-macos-aarch64
@@ -273,6 +327,20 @@ jobs:
             cat /tmp/smoke.log
             exit 1
           fi
+      # No WebGPU on Windows yet (README, "WebGPU support"): the player must
+      # refuse a WebGPU-only cart and say why.
+      - name: WebGPU refusal test
+        shell: bash
+        run: |
+          cd build
+          (./wasmcart-run.exe ../test/wgpu/wgpucart.wasc > /tmp/wgpu.log 2>&1 & PID=$!; sleep 5; kill $PID 2>/dev/null; wait $PID 2>/dev/null) || true
+          if grep -q "this host cannot provide WebGPU: this build of wasmcart-native has no WebGPU support" /tmp/wgpu.log; then
+            echo "PASS: WebGPU-only cart refused with the reason"
+          else
+            echo "FAIL: WebGPU-only cart not refused as expected"
+            cat /tmp/wgpu.log
+            exit 1
+          fi
       - name: Package
         shell: bash
         run: |
@@ -309,6 +377,9 @@ jobs:
             ```
 
             macOS and Windows include ANGLE (libEGL + libGLESv2) for GLES3 support.
+
+            WebGPU carts (wasmcart ${{ env.WASMCART_VERSION }}, Dawn from native-dawn ${{ env.NATIVE_DAWN_VERSION }}) run on the Linux and macOS builds: keep the `wgpu/` directory beside `wasmcart-run`. Linux uses Vulkan, macOS Metal.
+            The Windows build has no WebGPU yet (native-dawn's Windows addon cannot load into wasmcart-run.exe): it refuses WebGPU-only carts and runs carts that also import GL on GL.
           files: |
             artifacts/wasmcart-native-linux-x86_64/*.tar.gz
             artifacts/wasmcart-native-linux-aarch64/*.tar.gz
