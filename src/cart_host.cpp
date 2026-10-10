@@ -1219,6 +1219,26 @@ static void threads_shutdown(wc_host_t* host) {
 static void pump_node(wc_host_t* host);
 
 static v8::Global<v8::Object> g_wgpu_bridge;
+
+// Free Node's environment at exit while dawn.node is still intact.
+//
+// g_setup is a static of this program, so its destructor (which runs
+// node::FreeEnvironment, finalizing every wrapper still alive) is registered
+// at startup and runs LAST at exit, after the static destructors of
+// dawn.node, which registers its own when it is loaded. A wrapper still alive
+// then (a GPUDevice the cart requested, kept by the cart's glue until the
+// environment goes) is finalized against dawn.node's already destroyed
+// device map (GPUDevice::~GPUDevice erases from a static unordered_map), and
+// the player segfaulted on about half the exits of such a cart. An atexit
+// handler registered after dawn.node is loaded runs before its destructors.
+static void free_node_before_dawn(void) {
+    if (!g_setup) return;
+    {
+        v8::Locker locker(g_isolate);
+        g_wgpu_bridge.Reset();
+    }
+    g_setup.reset();
+}
 static std::string g_wgpu_unavailable;
 static bool g_wgpu_probed = false;
 
@@ -1276,7 +1296,10 @@ static v8::Local<v8::Object> wgpu_bridge() {
             "  try { return __wc_require('node:module').createRequire(p.join(dir, 'wgpu_bridge.cjs'))(p.join(dir, 'wgpu_bridge.cjs'))(dir); }"
             "  catch (e) { return 'loading WebGPU support from ' + dir + ' failed: ' + e.message; }"
             "})", 1, argv);
-        if (r->IsObject()) g_wgpu_bridge.Reset(g_isolate, r.As<v8::Object>());
+        if (r->IsObject()) {
+            g_wgpu_bridge.Reset(g_isolate, r.As<v8::Object>());
+            atexit(free_node_before_dawn);  // dawn.node is loaded now
+        }
         else if (r->IsString()) { v8::String::Utf8Value s(g_isolate, r); g_wgpu_unavailable = *s; }
         else g_wgpu_unavailable = "loading WebGPU support failed";
     }

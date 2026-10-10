@@ -86,9 +86,7 @@ has   "WASMCART_WGPU_POWER reaches the adapter request"     lowpower "compatibil
 run wgpuedges 12 resized
 check "resized webgpu cart: shot is the new size"     "$(head -c 15 "$OUT/resized.ppm" 2>/dev/null | tr '\n' ' ')" "P6 160 120 255 "
 check "resized webgpu cart: shot is the new frame"    "$(pixel resized 150 110 2>/dev/null)" "0,0,255"
-# Not checked: its exit status. wgpuedges requests a device of its own, and a
-# cart that did crashes in node::FreeEnvironment (a dawn.node finalizer) on
-# about half its exits, before and after this fix alike.
+check "resized webgpu cart: clean exit"               "$(cat "$OUT/resized.status")" "0"
 
 # A lost device: the player stops the cart, says so and exits 4 by itself
 # (the shot at frame 30 is never reached).
@@ -131,6 +129,19 @@ while [ $k -lt 8 ]; do
   k=$((k + 1))
 done
 check "8 more runs exit cleanly" "$crashes" "0"
+
+# A cart that requested a device of its own (wgpuedges), repeated: its device's
+# wrapper outlives the cart and is finalized when Node's environment is freed
+# at exit; that used to happen after dawn.node's own statics were gone and
+# crashed about one exit in two.
+crashes=0
+k=0
+while [ $k -lt 20 ]; do
+  run wgpuedges 3 ownloop
+  [ "$(cat "$OUT/ownloop.status")" = "0" ] || crashes=$((crashes + 1))
+  k=$((k + 1))
+done
+check "20 runs of a cart with its own device exit cleanly" "$crashes" "0"
 
 rm -rf "$OUT"
 [ $fail -eq 0 ] && echo "all wgpu checks passed"
