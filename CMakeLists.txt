@@ -261,6 +261,21 @@ if(UNIX AND NOT APPLE)
     target_link_options(wasmcart-run PRIVATE "-Wl,--dynamic-list=${CMAKE_BINARY_DIR}/node-api-exports.list")
 endif()
 
+# macOS: ANGLE's prebuilt dylibs name themselves ./libEGL.dylib and
+# ./libGLESv2.dylib, so the player only started when run from its own
+# directory. Point it at the copies beside the executable instead, and re-sign
+# (changing a load command invalidates the ad-hoc signature, and Apple Silicon
+# refuses to run an unsigned binary).
+if(APPLE AND ANGLE_DIR)
+    add_custom_command(TARGET wasmcart-run POST_BUILD
+        COMMAND install_name_tool
+            -change ./libEGL.dylib @executable_path/libEGL.dylib
+            -change ./libGLESv2.dylib @executable_path/libGLESv2.dylib
+            $<TARGET_FILE:wasmcart-run>
+        COMMAND codesign --force --sign - $<TARGET_FILE:wasmcart-run>
+        VERBATIM)
+endif()
+
 # ─── Status ─────────────────────────────────────────────────────────────
 
 message(STATUS "")

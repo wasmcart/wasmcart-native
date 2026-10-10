@@ -195,6 +195,7 @@ jobs:
           # -x: local symbols only. dawn.node resolves N-API from this
           # executable's exported globals, which a plain strip removes.
           strip -x wasmcart-run
+          codesign --force --sign - wasmcart-run   # strip changed the binary: re-sign (Apple Silicon runs signed code only)
       - name: Smoke test
         run: |
           cp deps/angle/lib/*.dylib build/
@@ -247,6 +248,7 @@ jobs:
           # -x: local symbols only. dawn.node resolves N-API from this
           # executable's exported globals, which a plain strip removes.
           strip -x wasmcart-run
+          codesign --force --sign - wasmcart-run   # strip changed the binary: re-sign (Apple Silicon runs signed code only)
       - name: Smoke test
         run: |
           cp deps/angle/lib/*.dylib build/
