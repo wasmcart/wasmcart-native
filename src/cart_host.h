@@ -103,6 +103,10 @@ struct wc_host {
     // unconditionally. Queued strings are dropped on end(), so what was typed
     // into one field cannot resurface in the next.
     bool  text_active;
+
+    // Runtime code generation: the off switch, and its notice once raised.
+    bool  jit_disabled;
+    char  jit_notice[512];
     char* text_queue;        // NUL-separated UTF-8 strings
     size_t text_queue_len;
     size_t text_queue_cap;

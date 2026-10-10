@@ -564,6 +564,10 @@ int main(int argc, char* argv[]) {
 
     char title[300];
     snprintf(title, sizeof(title), "wasmcart - %s", manifest->name);
+    // Runtime code generation switched off (WASMCART_JIT=0) is a breaking
+    // setting: say so in the title, where the player is looking.
+    if (wc_host_jit_notice(host))
+        snprintf(title, sizeof(title), "wasmcart - %s - RUNTIME CODE GENERATION OFF (WASMCART_JIT=0)", manifest->name);
 
     SDL_Window* window = SDL_CreateWindow(title,
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -897,6 +901,15 @@ int main(int argc, char* argv[]) {
 
         // Run frame
         wc_host_run_frame(host);
+        {
+            static bool jit_titled = false;
+            if (!jit_titled && wc_host_jit_notice(host)) {
+                jit_titled = true;
+                char t[300];
+                snprintf(t, sizeof(t), "wasmcart - %s - RUNTIME CODE GENERATION OFF (WASMCART_JIT=0)", manifest->name);
+                SDL_SetWindowTitle(window, t);
+            }
+        }
         if (dbg_cmd_count) {
             static uint32_t reply_seq = 0;
             dbg_poll_reply(host, &reply_seq);

@@ -202,6 +202,14 @@ function spawn(arg) {
 const notOnWorker = (name) => () => {
   throw new Error(`${name}() is main-thread only; called from cart thread ${tid}`);
 };
+// Runtime code generation: this thread's instance has its own table and links
+// into its own slots. __wcJitLib (wasmcart's src/jit.js, jit_js.h) is prepended
+// to this source by the host. The off-switch notice is the main thread's.
+let instance = null;
+const jit = __wcJitLib.createJitImports({
+  getInstance: () => instance, getMemory: () => memory, mode: 'sync',
+  disabled: !!cfg.jitDisabled, onNotice: () => {},
+});
 const imports = {};
 for (const imp of WebAssembly.Module.imports(wasmModule)) {
   const ns = (imports[imp.module] ||= {});
@@ -219,6 +227,7 @@ for (const imp of WebAssembly.Module.imports(wasmModule)) {
     else if (n === 'wc_asset_size') val = assetSize;
     else if (n === 'wc_load_asset') val = loadAsset;
     else if (n === 'wc_debug_mark' || n === 'wc_frame_yield') val = () => {};
+    else if (jit.imports[n]) val = jit.imports[n];
     else if (n === 'emscripten_memcpy_js') val = (d, s, c) => { u8().copyWithin(d, s, s + c); };
     else if (n.startsWith('wc_') || /^gl[A-Z]/.test(n) || n.startsWith('emscripten_gl')) val = notOnWorker(n);
     else val = () => 0;
@@ -227,7 +236,7 @@ for (const imp of WebAssembly.Module.imports(wasmModule)) {
 }
 
 try {
-  const instance = new WebAssembly.Instance(wasmModule, imports);
+  instance = new WebAssembly.Instance(wasmModule, imports);
   instance.exports.wasi_thread_start(tid, startArg);
 } catch (err) {
   if (err instanceof ProcExit) log(`thread called ${err.message}; thread ended`);
