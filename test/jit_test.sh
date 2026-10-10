@@ -29,4 +29,5 @@ check "link, call through the slot, unlink, re-link into the same slot" "$OUT/du
 run 0
 check "off switch: the cart sees key 1 = 1 and -1 from the link" "$OUT/dump0.json" '"off": 1, "max_module": 4194304, "link_ret": -1, "cell": -1'
 check "off switch: the loud notice" "$OUT/run0.log" 'RUNTIME CODE GENERATION IS OFF'
+node "$DIR/jit_generation.mjs" || fail=1
 exit $fail
