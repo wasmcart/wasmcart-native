@@ -360,8 +360,10 @@ void wc_host_run_frame(wc_host_t* host);
 
 // ─── Runtime code generation ───────────────────────────────────────────────
 // After writing a save state or rewind snapshot back into cart memory: unlink
-// every slot the cart linked (they are never carried across a restore) and
-// drop compiles in flight.
+// every slot the cart linked (they are never carried across a restore), drop
+// compiles in flight and change the restore generation (wc_jit_config key 7),
+// in one step, before the cart runs again. The cart's engine sees key 7 change
+// and forgets its slots.
 void wc_host_jit_unlink_all(wc_host_t* host);
 // NULL, or the off-switch notice once a cart has called a JIT import while
 // runtime code generation is off. Show it (window title, OSD, toast).
