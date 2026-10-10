@@ -88,6 +88,68 @@ static void close_controller(SDL_JoystickID id) {
     }
 }
 
+// ─── Input-action origins (wasmcart SPEC.md, "Input actions") ───────────────
+// Tell the host what a cart's actions are on: the keyboard map below (the
+// first key poll_keyboard_as_pad lists for each input) and, per player, the
+// device used last plus the controller family from SDL.
+
+static int pad_family(SDL_GameController* gc) {
+    switch (SDL_GameControllerGetType(gc)) {
+    case SDL_CONTROLLER_TYPE_XBOX360:
+    case SDL_CONTROLLER_TYPE_XBOXONE: return WC_HOST_PAD_XBOX;
+    case SDL_CONTROLLER_TYPE_PS3:
+    case SDL_CONTROLLER_TYPE_PS4:
+    case SDL_CONTROLLER_TYPE_PS5: return WC_HOST_PAD_PLAYSTATION;
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+#endif
+        return WC_HOST_PAD_NINTENDO;
+    default: return WC_HOST_PAD_GENERIC;
+    }
+}
+
+static void register_key_origins(wc_host_t* host) {
+    static const struct { int input; const char* label; int hid; } keys[] = {
+        { 0, "Z", 0x1d }, { 1, "X", 0x1b }, { 2, "C", 0x06 }, { 3, "V", 0x19 },
+        { 4, "Q", 0x14 }, { 5, "E", 0x08 }, { 6, "Enter", 0x28 }, { 7, "Backspace", 0x2a },
+        { 8, "Up", 0x52 }, { 9, "Down", 0x51 }, { 10, "Left", 0x50 }, { 11, "Right", 0x4f },
+        { 36, "Arrow keys", 0 },
+    };
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
+        wc_host_input_key(host, keys[i].input, keys[i].label, keys[i].hid);
+}
+
+static int pad_in_use(const wc_pad_t* p) {
+    const int dz = 16000;
+    return p->buttons || p->left_x > dz || p->left_x < -dz || p->left_y > dz || p->left_y < -dz ||
+           p->right_x > dz || p->right_x < -dz || p->right_y > dz || p->right_y < -dz ||
+           p->left_trigger > dz || p->right_trigger > dz;
+}
+
+// Calls into the host only when a player's device or pad family changes.
+static void update_input_devices(wc_host_t* host, const wc_pad_t pads[WC_MAX_PADS], int kb_used) {
+    static int last_dev[WC_MAX_PADS] = { -1, -1, -1, -1 }, last_fam[WC_MAX_PADS];
+    for (int i = 0; i < WC_MAX_PADS; i++) {
+        SDL_GameController* gc = i < MAX_CONTROLLERS ? controllers[i] : NULL;
+        int dev = gc ? WC_HOST_DEVICE_GAMEPAD : WC_HOST_DEVICE_UNKNOWN;
+        if (i == 0) {
+            dev = last_dev[0] > 0 ? last_dev[0] : (gc ? WC_HOST_DEVICE_GAMEPAD : WC_HOST_DEVICE_KEYBOARD_MOUSE);
+            if (kb_used) dev = WC_HOST_DEVICE_KEYBOARD_MOUSE;
+            else if (gc && pad_in_use(&pads[0])) dev = WC_HOST_DEVICE_GAMEPAD;
+            else if (!gc && dev == WC_HOST_DEVICE_GAMEPAD) dev = WC_HOST_DEVICE_KEYBOARD_MOUSE;
+        }
+        int fam = gc ? pad_family(gc) : 0;
+        if (dev != last_dev[i] || fam != last_fam[i]) {
+            wc_host_input_device(host, i, dev, fam);
+            last_dev[i] = dev;
+            last_fam[i] = fam;
+        }
+    }
+}
+
 // ─── Poll gamepads ─────────────────────────────────────────────────────────
 
 static void poll_pads(wc_pad_t pads[WC_MAX_PADS]) {
@@ -447,6 +509,7 @@ int main(int argc, char* argv[]) {
         free(sav_data);
         return 1;
     }
+    register_key_origins(host);
 
     const wc_cart_info_t* info = wc_host_get_cart_info(host);
     const wc_manifest_t* manifest = wc_host_get_manifest(host);
@@ -781,10 +844,15 @@ int main(int argc, char* argv[]) {
         // Start. Gamepads are unaffected -- a controller keeps working while a
         // text field is open, which is what you want for a d-pad character
         // picker.
+        wc_pad_t kb_pad;
+        memset(&kb_pad, 0, sizeof kb_pad);
         if (!wc_host_text_input_active(host)) {
-            poll_keyboard_as_pad(&pads[0]);
+            poll_keyboard_as_pad(&kb_pad);
+            pads[0].buttons |= kb_pad.buttons;
+            if (kb_pad.connected) pads[0].connected = 1;
         }
         wc_host_set_pads(host, pads);
+        update_input_devices(host, pads, kb_pad.buttons != 0);
 
         // Time. --fixed-step replaces the wall clock with frame * step, so a
         // given frame always sees the same time no matter how fast frames ran

@@ -228,6 +228,7 @@ for (const imp of WebAssembly.Module.imports(wasmModule)) {
     else if (n === 'wc_load_asset') val = loadAsset;
     else if (n === 'wc_debug_mark' || n === 'wc_frame_yield') val = () => {};
     else if (jit.imports[n]) val = jit.imports[n];
+    else if (__wcActionImports[n]) val = __wcActionImports[n]; // main-thread state: "unknown" here
     else if (n === 'emscripten_memcpy_js') val = (d, s, c) => { u8().copyWithin(d, s, s + c); };
     else if (n.startsWith('wc_') || /^gl[A-Z]/.test(n) || n.startsWith('emscripten_gl')) val = notOnWorker(n);
     else val = () => 0;

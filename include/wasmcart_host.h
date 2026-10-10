@@ -369,6 +369,31 @@ void wc_host_jit_unlink_all(wc_host_t* host);
 // runtime code generation is off. Show it (window title, OSD, toast).
 const char* wc_host_jit_notice(wc_host_t* host);
 
+// ─── Input actions (wasmcart SPEC.md, "Input actions") ───────────────────────
+// The cart declares actions with default pad bindings; the embedder says what
+// they are on. Each call bumps wc_input_revision when an answer changes, so
+// call on change, not every frame.
+#define WC_HOST_DEVICE_UNKNOWN        0
+#define WC_HOST_DEVICE_KEYBOARD_MOUSE 1
+#define WC_HOST_DEVICE_GAMEPAD        2
+#define WC_HOST_DEVICE_TOUCH          3
+#define WC_HOST_DEVICE_REMOTE         4
+#define WC_HOST_PAD_XBOX        1
+#define WC_HOST_PAD_PLAYSTATION 2
+#define WC_HOST_PAD_NINTENDO    3
+#define WC_HOST_PAD_GENERIC     4
+// The device a player used last; pad_family (WC_HOST_PAD_*) labels a gamepad.
+void wc_host_input_device(wc_host_t* host, int player, int device, int pad_family);
+// The embedder's keyboard map: the key on which a logical input (WC_IN_*,
+// 0-20 button bit index, 32-36 sticks/triggers/d-pad) sits, as a label and
+// HID scancode (0 = none). Once any key is set, inputs with no key read as
+// unbound on the keyboard.
+void wc_host_input_key(wc_host_t* host, int input, const char* label, int hid_scancode);
+// Remap an action for a player: an input id, -1 unbound, -2 back to the default.
+void wc_host_action_bind(wc_host_t* host, int player, int action, int input);
+// The embedder's own mapping changed in a way the calls above do not cover.
+void wc_host_input_changed(wc_host_t* host);
+
 // V8 locking — hold locker persistently for hosts that call from the same thread
 void wc_host_enter_v8(void);
 void wc_host_exit_v8(void);
