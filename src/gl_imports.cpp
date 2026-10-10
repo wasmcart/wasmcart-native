@@ -1327,7 +1327,9 @@ static void _init_fb_upload(void) {
         "uniform sampler2D uTex;\n"
         "out vec4 fragColor;\n"
         "void main() {\n"
-        "  fragColor = texture(uTex, vUV);\n"
+        // The cart's ARGB8888 is B, G, R, A in memory; uploaded as GL_RGBA
+        // (GL_BGRA_EXT is not core GLES3) it samples as .bgra.
+        "  fragColor = texture(uTex, vUV).bgra;\n"
         "}\n";
 
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
@@ -1357,7 +1359,8 @@ extern "C" void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint
     _init_fb_upload();
     if (!_fb_upload_program) return;
 
-    // Upload pixels as texture (ARGB8888 = BGRA byte order on little-endian)
+    // Upload pixels as texture (ARGB8888 = BGRA byte order on little-endian;
+    // the shader swizzles it back)
     glBindTexture(GL_TEXTURE_2D, _fb_upload_tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
         GL_RGBA, GL_UNSIGNED_BYTE, pixels);
