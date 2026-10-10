@@ -71,6 +71,10 @@ struct wc_host {
     bool cart_imports_gl;
     bool cart_imports_wgpu;
     bool uses_wgpu;
+    // Where the cart's wc_info_t lives, so a WebGPU cart's size change
+    // (SPEC.md, "Resolution changes", GPU carts) is re-read after wc_render.
+    uint32_t info_ptr;
+    bool size_warned;
 
     // WASI threads: imports wasi.thread-spawn + exports wasi_thread_start
     bool threaded;

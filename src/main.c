@@ -398,6 +398,7 @@ int main(int argc, char* argv[]) {
     bool show_fps = false;
     bool uncapped = false;
     bool no_direct = false; /* --no-direct: always present through the redirect */
+    int exit_status = 0;    /* 1: a --shot frame could not be read */
     long shot_frame = -1;   /* --shot N file.ppm: save frame N as the cart drew it (tests) */
     const char* shot_path = NULL;
     double fixed_step = 0.0; /* --fixed-step MS: time_ms = frame * MS (tests) */
@@ -944,6 +945,14 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "wasmcart: frame %ld -> %s (%s)\n", shot_frame, shot_path, wc_gl_is_direct() ? "direct" : "redirect");
             }
             free(px);
+            // A shot that cannot be written ends the run with an error rather
+            // than leaving a caller waiting for a file that never comes.
+            if (!f) {
+                fprintf(stderr, "wasmcart: --shot: could not save frame %ld to %s\n", shot_frame, shot_path);
+                exit_status = 1;
+                running = false;
+                break;
+            }
         }
 
         if (shot_path && (long)frame_count == shot_frame && is_wgpu) {
@@ -958,6 +967,12 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "wasmcart: frame %ld -> %s (webgpu)\n", shot_frame, shot_path);
             }
             free(px);
+            if (!f) {
+                fprintf(stderr, "wasmcart: --shot: could not save frame %ld to %s\n", shot_frame, shot_path);
+                exit_status = 1;
+                running = false;
+                break;
+            }
         }
 
         // Present
@@ -1042,5 +1057,5 @@ int main(int argc, char* argv[]) {
     free(sav_data);
     SDL_Quit();
 
-    return 0;
+    return exit_status;
 }

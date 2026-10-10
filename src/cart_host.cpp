@@ -267,6 +267,7 @@ static int check_abi_version(wc_host_t* host) {
 static void parse_cart_info(wc_host_t* host, uint32_t info_ptr) {
     uint8_t* mem = host->memory;
     wc_cart_info_t* info = &host->info;
+    host->info_ptr = info_ptr;
 
     info->version        = wc_read_u32(mem, info_ptr + WC_INFO_VERSION);
     info->width          = wc_read_u32(mem, info_ptr + WC_INFO_WIDTH);
@@ -2416,6 +2417,24 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     }
 
     refresh_memory(host);
+
+    // A WebGPU cart changes size by reconfiguring its surface and writing the
+    // new size into wc_info_t (SPEC.md, "Resolution changes", GPU carts): adopt
+    // it, so presenting and --shot read the frame at the size it now has.
+    if (host->uses_wgpu && host->memory && host->info_ptr
+        && (uint64_t)host->info_ptr + WC_INFO_HEIGHT + 4 <= host->memory_size) {
+        uint32_t w = wc_read_u32(host->memory, host->info_ptr + WC_INFO_WIDTH);
+        uint32_t h = wc_read_u32(host->memory, host->info_ptr + WC_INFO_HEIGHT);
+        if (w != host->info.width || h != host->info.height) {
+            if (w >= 1 && h >= 1 && w <= 16384 && h <= 16384) {
+                host->info.width = w;
+                host->info.height = h;
+            } else if (!host->size_warned) {
+                host->size_warned = true;
+                wc_log("wasmcart: ignoring the cart's new size %ux%u (keeping %ux%u)\n", w, h, host->info.width, host->info.height);
+            }
+        }
+    }
 
     // Clear AFTER the frame, not before: the cart has now read the total, and
     // leaving it set would scroll forever off a single flick.

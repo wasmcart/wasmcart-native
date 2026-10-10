@@ -15,6 +15,8 @@
 #   gpuapi2/3    gpu_api values the cart does not back; refused
 #   wgpufake     imports a WebGPU function the glue lacks; refused
 #   wasicart     wgpucart built with wasi-sdk (wasip1-threads, two workers)
+#   wgpuedges    reconfigures its surface from 128x96 to 160x120 at frame 10
+#                and draws blue from then on
 #
 # Every run must also EXIT cleanly: teardown with GPU work in flight used to
 # abort or segfault in node::FreeEnvironment.
@@ -75,6 +77,14 @@ has   "webgpu cart: the adapter it got is logged"         wgpucart "wasmcart-run
 
 run wgpucart 3 lowpower WASMCART_WGPU_POWER=low-power
 has   "WASMCART_WGPU_POWER reaches the adapter request"     lowpower "compatibility, low-power)"
+
+# A shot after the cart resized its surface: the host adopts the size the cart
+# wrote into wc_info_t, so the frame is read (it used to never be written and
+# the run had to be killed).
+run wgpuedges 12 resized
+check "resized webgpu cart: shot is the new size"     "$(head -c 15 "$OUT/resized.ppm" 2>/dev/null | tr '\n' ' ')" "P6 160 120 255 "
+check "resized webgpu cart: shot is the new frame"    "$(pixel resized 150 110 2>/dev/null)" "0,0,255"
+check "resized webgpu cart: clean exit"               "$(cat "$OUT/resized.status")" "0"
 
 run dualgpu 3 dual
 check "dual cart: WebGPU selected, green"              "$(pixel dual 64 48 2>/dev/null)" "0,255,0"
