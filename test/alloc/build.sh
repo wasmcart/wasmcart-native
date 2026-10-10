@@ -11,6 +11,7 @@ b() { # name defines...
     -o "$HERE/$name.wasm" "$HERE/alloccart.c"
 }
 b wcalloc_gl       -DALLOC=1 -DCALLS=7   # wc_alloc/wc_free; glGetString, glGetStringi, map/unmap
+b mapdraw_gl       -DALLOC=1 -DCALLS=8   # draws vertices written through a WRITE|UNSYNCHRONIZED sub-range mapping
 b noalloc_plain    -DALLOC=0 -DCALLS=0   # no allocator, never needs one
 b noalloc_getstr   -DALLOC=0 -DCALLS=1   # no allocator, calls glGetString
 b noalloc_map      -DALLOC=0 -DCALLS=2   # no allocator, calls glMapBufferRange

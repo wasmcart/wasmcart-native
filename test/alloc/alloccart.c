@@ -13,7 +13,10 @@
  *   -DALLOC=6  malloc only (16-aligned), no free
  *   -DALLOC=7  malloc only, whose blocks are 8- but never 16-byte aligned
  *   -DCALLS=   bitmask: 1 glGetString(GL_VERSION), 2 glMapBufferRange/
- *              glUnmapBuffer, 4 glGetStringi(GL_EXTENSIONS, 0)
+ *              glUnmapBuffer, 4 glGetStringi(GL_EXTENSIONS, 0), 8 draw
+ *              from vertices written through a write-only, unsynchronized
+ *              mapping of a sub-range of an array buffer (Godot's 2D canvas
+ *              path: a blue quad over grey, checked by its pixels)
  *   -DTEXT=1   2D cart taking text input and peer messages (alloc_test.c)
  *
  * The cart reports through wc_log ("alloccart: ...") and, for the C harness,
@@ -56,6 +59,25 @@ IMPORT("gl", "glBindBuffer") extern void glBindBuffer(uint32_t target, uint32_t 
 IMPORT("gl", "glBufferData") extern void glBufferData(uint32_t target, int32_t size, const void* data, uint32_t usage);
 IMPORT("gl", "glMapBufferRange") extern void* glMapBufferRange(uint32_t target, int32_t off, int32_t len, uint32_t access);
 IMPORT("gl", "glUnmapBuffer") extern uint32_t glUnmapBuffer(uint32_t target);
+#endif
+#if CALLS & 8
+IMPORT("gl", "glGenBuffers") extern void glGenBuffers(int32_t n, uint32_t* out);
+IMPORT("gl", "glBindBuffer") extern void glBindBuffer(uint32_t target, uint32_t buf);
+IMPORT("gl", "glBufferData") extern void glBufferData(uint32_t target, int32_t size, const void* data, uint32_t usage);
+IMPORT("gl", "glMapBufferRange") extern void* glMapBufferRange(uint32_t target, int32_t off, int32_t len, uint32_t access);
+IMPORT("gl", "glUnmapBuffer") extern uint32_t glUnmapBuffer(uint32_t target);
+IMPORT("gl", "glCreateShader") extern uint32_t glCreateShader(uint32_t type);
+IMPORT("gl", "glShaderSource") extern void glShaderSource(uint32_t sh, int32_t n, const char* const* src, const int32_t* len);
+IMPORT("gl", "glCompileShader") extern void glCompileShader(uint32_t sh);
+IMPORT("gl", "glCreateProgram") extern uint32_t glCreateProgram(void);
+IMPORT("gl", "glAttachShader") extern void glAttachShader(uint32_t prog, uint32_t sh);
+IMPORT("gl", "glLinkProgram") extern void glLinkProgram(uint32_t prog);
+IMPORT("gl", "glUseProgram") extern void glUseProgram(uint32_t prog);
+IMPORT("gl", "glGenVertexArrays") extern void glGenVertexArrays(int32_t n, uint32_t* out);
+IMPORT("gl", "glBindVertexArray") extern void glBindVertexArray(uint32_t vao);
+IMPORT("gl", "glEnableVertexAttribArray") extern void glEnableVertexAttribArray(uint32_t idx);
+IMPORT("gl", "glVertexAttribPointer") extern void glVertexAttribPointer(uint32_t idx, int32_t size, uint32_t type, uint32_t norm, int32_t stride, const void* off);
+IMPORT("gl", "glDrawArrays") extern void glDrawArrays(uint32_t mode, int32_t first, int32_t count);
 #endif
 #endif
 
@@ -160,6 +182,49 @@ EXPORT("wc_render") void wc_render(void) {
 #else
 static int frame, ok = 1;
 
+#if CALLS & 8
+/* Godot 4's GLES3 canvas renderer (outside WEB_ENABLED) uploads its instance
+ * data every frame with glMapBufferRange(GL_ARRAY_BUFFER, offset, len,
+ * WRITE | UNSYNCHRONIZED), memcpy, glUnmapBuffer, then draws from it. Here:
+ * a 12-vertex buffer of zeros (degenerate), the second six vertices written
+ * through such a mapping each frame and drawn. A host whose mapping never
+ * reaches the buffer leaves the frame grey. */
+static uint32_t quad_prog, quad_vao, quad_buf;
+static void quad_setup(void) {
+  static const char* vs = "#version 300 es\nlayout(location = 0) in vec2 p;\n"
+                          "void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+  static const char* fs = "#version 300 es\nprecision mediump float;\nout vec4 o;\n"
+                          "void main() { o = vec4(0.2, 0.6, 1.0, 1.0); }\n";
+  static float zeros[24];
+  uint32_t v = glCreateShader(0x8B31), f = glCreateShader(0x8B30);   /* VERTEX, FRAGMENT */
+  glShaderSource(v, 1, &vs, 0); glCompileShader(v);
+  glShaderSource(f, 1, &fs, 0); glCompileShader(f);
+  quad_prog = glCreateProgram();
+  glAttachShader(quad_prog, v); glAttachShader(quad_prog, f);
+  glLinkProgram(quad_prog);
+  glGenVertexArrays(1, &quad_vao);
+  glBindVertexArray(quad_vao);
+  glGenBuffers(1, &quad_buf);
+  glBindBuffer(0x8892, quad_buf);                            /* GL_ARRAY_BUFFER */
+  glBufferData(0x8892, sizeof zeros, zeros, 0x88E8);         /* GL_DYNAMIC_DRAW */
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 2, 0x1406, 0, 8, 0);              /* GL_FLOAT */
+}
+static void quad_draw(void) {
+  static const float q[12] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f,
+                               -0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
+  glBindVertexArray(quad_vao);
+  glBindBuffer(0x8892, quad_buf);
+  float* m = (float*)glMapBufferRange(0x8892, sizeof q, sizeof q, 2 | 0x20);  /* WRITE|UNSYNCHRONIZED */
+  if (m) {
+    for (int i = 0; i < 12; i++) m[i] = q[i];
+    glUnmapBuffer(0x8892);
+  }
+  glUseProgram(quad_prog);
+  glDrawArrays(4, 6, 6);                                     /* GL_TRIANGLES */
+}
+#endif
+
 EXPORT("wc_render") void wc_render(void) {
   if (frame++ == 2) {
 #if CALLS & 1
@@ -212,8 +277,15 @@ EXPORT("wc_render") void wc_render(void) {
     lput(" free_calls="); lnum(free_calls);
     lflush();
   }
+#if CALLS & 8
+  if (frame == 1) quad_setup();
+  glClearColor(0.3f, 0.3f, 0.3f, 1.0f);
+  glClear(0x4000);
+  quad_draw();
+#else
   if (ok) glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
   else glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
   glClear(0x4000);
+#endif
 }
 #endif

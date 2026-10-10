@@ -71,6 +71,19 @@ lacks wcalloc_gl 'deprecated' "no deprecation warning"
 green wcalloc_gl
 clean wcalloc_gl
 
+# blue NAME X Y / grey NAME X Y: the pixel is the quad's blue or the clear's grey
+blue() { p=$(pixel "$1" $2 $3); if [ "$p" = "51,153,255" ]; then ok "$1: ($2,$3) is the quad's blue"; else bad "$1: pixel ($2,$3) $p, want 51,153,255"; fi; }
+grey() { p=$(pixel "$1" $2 $3); if [ "$p" = "76,76,76" ]; then ok "$1: ($2,$3) is the clear grey"; else bad "$1: pixel ($2,$3) $p, want 76,76,76"; fi; }
+
+echo "draw from a write-only, unsynchronized mapping of a buffer sub-range (Godot's 2D canvas)"
+run mapdraw_gl mapdraw_gl
+blue  mapdraw_gl 32 32
+blue  mapdraw_gl 20 44
+grey  mapdraw_gl 4 4
+grey  mapdraw_gl 60 60
+lacks mapdraw_gl 'GL error' "no GL errors"
+clean mapdraw_gl
+
 echo "no allocator, no path that needs one: loads and runs"
 run noalloc_plain noalloc_plain
 has   noalloc_plain 'alloccart: done ok=1' "runs"
