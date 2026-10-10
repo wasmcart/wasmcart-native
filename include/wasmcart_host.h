@@ -369,6 +369,43 @@ void wc_host_jit_unlink_all(wc_host_t* host);
 // runtime code generation is off. Show it (window title, OSD, toast).
 const char* wc_host_jit_notice(wc_host_t* host);
 
+// ─── Input actions (wasmcart SPEC.md, "Input actions") ───────────────────────
+// The cart declares actions with default pad bindings; the embedder says what
+// they are on. Each call bumps wc_input_revision when an answer changes, so
+// call on change, not every frame.
+#define WC_HOST_DEVICE_UNKNOWN        0
+#define WC_HOST_DEVICE_KEYBOARD_MOUSE 1
+#define WC_HOST_DEVICE_GAMEPAD        2
+#define WC_HOST_DEVICE_TOUCH          3
+#define WC_HOST_DEVICE_REMOTE         4
+#define WC_HOST_PAD_XBOX        1
+#define WC_HOST_PAD_PLAYSTATION 2
+#define WC_HOST_PAD_NINTENDO    3
+#define WC_HOST_PAD_GENERIC     4
+// The device a player used last; pad_family (WC_HOST_PAD_*) labels a gamepad.
+void wc_host_input_device(wc_host_t* host, int player, int device, int pad_family);
+// The embedder's keyboard map: the key on which a logical input (WC_IN_*,
+// 0-20 button bit index, 32-36 sticks/triggers/d-pad) sits, as a label and
+// HID scancode (0 = none). Once any key is set, inputs with no key read as
+// unbound on the keyboard.
+void wc_host_input_key(wc_host_t* host, int input, const char* label, int hid_scancode);
+// Remap an action for a player: an input id, -1 unbound, -2 back to the default.
+void wc_host_action_bind(wc_host_t* host, int player, int action, int input);
+// The cart's declared actions, for remap screens, help overlays and frontend
+// input descriptors. Fills up to max entries; returns how many exist.
+typedef struct {
+    char    name[65];       // UTF-8, as the cart declared it
+    char    set[65];        // the action set's name
+    int32_t set_id;
+    int32_t kind;           // 0 digital, 1 analog
+    int32_t default_input;  // the cart's default binding (input id, -1 none)
+    int32_t input;          // the binding in effect for this player
+    int32_t active;         // 1 if the set is the player's active one
+} wc_host_action_t;
+int wc_host_actions(wc_host_t* host, int player, wc_host_action_t* out, int max);
+// The embedder's own mapping changed in a way the calls above do not cover.
+void wc_host_input_changed(wc_host_t* host);
+
 // V8 locking — hold locker persistently for hosts that call from the same thread
 void wc_host_enter_v8(void);
 void wc_host_exit_v8(void);

@@ -34,6 +34,7 @@ extern "C" {
 #include "wc_log.h"
 #include "thread_worker_js.h"
 #include "jit_js.h"
+#include "actions_js.h"
 #include "../deps/miniz.h"
 extern "C" FILE* _wc_log_file = NULL;
 extern "C" long _wc_log_bytes = 0;
@@ -63,6 +64,7 @@ struct v8_host_state {
     v8::Global<v8::Function> fn_wc_set_seed;
     v8::Global<v8::Object> memory_obj;   // WebAssembly.Memory
     v8::Global<v8::Object> jit;          // runtime code generation: createJitImports(...) + attach()
+    v8::Global<v8::Object> actions;      // input actions: WC_ACTIONS_HOST_JS(...), kept across loads
 
     // WASI threads (wasi.thread-spawn). Empty for a cart that does not spawn.
     v8::Global<v8::Object> threads;      // { spawn, shutdown, count } from WC_THREADS_SPAWNER_JS
@@ -1198,6 +1200,158 @@ extern "C" const char* wc_host_jit_notice(wc_host_t* host) {
     return host && host->jit_notice[0] ? host->jit_notice : nullptr;
 }
 
+// ─── Input actions (wasmcart SPEC.md, "Input actions") ──────────────────────
+// The host side is wasmcart's own src/actions.js (actions_js.h, generated).
+// Action state is read from the pads the embedder wrote into cart memory;
+// origins come from the device, pad family and key table the embedder sets.
+static const char WC_ACTIONS_HOST_JS[] = R"WCJS((function (lib, inputPtr) {
+  'use strict';
+  let inst = null, mem = null;
+  const u8 = () => new Uint8Array((inst.exports.memory || mem).buffer);
+  const getPads = () => {
+    const ptr = inputPtr();
+    if (!inst || !ptr) return [];
+    const dv = new DataView(u8().buffer);
+    const pads = [];
+    for (let i = 0; i < 4; i++) {
+      const o = ptr + i * 20;
+      pads.push({ buttons: dv.getUint32(o, true), leftX: dv.getInt16(o + 4, true), leftY: dv.getInt16(o + 6, true),
+        rightX: dv.getInt16(o + 8, true), rightY: dv.getInt16(o + 10, true), leftTrigger: dv.getInt16(o + 12, true),
+        rightTrigger: dv.getInt16(o + 14, true), connected: dv.getUint8(o + 16) });
+    }
+    return pads;
+  };
+  const t = new lib.ActionTable({ getPads });
+  const fam = [0, 0, 0, 0];
+  let keys = null;
+  t.setDescriber((p, input, dev) => {
+    if (dev === lib.DEVICE.GAMEPAD) return lib.padOrigin(fam[p] || lib.GLYPH.GAMEPAD, input);
+    if (dev === lib.DEVICE.KEYBOARD_MOUSE && keys) {
+      const k = keys[input];
+      return k ? { label: k[0], glyph: k[1] ? lib.glyphId(lib.GLYPH.KEY, k[1]) : 0 } : null;
+    }
+    return undefined;
+  });
+  return {
+    imports: t.imports(u8),
+    attach: (i, m) => { inst = i; mem = m || null; t.reset(); },
+    device: (p, d, f) => { if (p >= 0 && p < 4 && fam[p] !== f) { fam[p] = f; t.bump(); } t.setDevice(p, d); },
+    key: (input, label, sc) => { (keys ||= {})[input] = [label, sc]; t.bump(); },
+    bind: (p, a, i) => t.setBinding(p, a, i === -2 ? undefined : i === -1 ? null : i),
+    bump: () => t.bump(),
+    list: (p) => t.list(p),
+  };
+}))WCJS";
+
+static const char* const WC_ACTION_IMPORT_NAMES[] = {
+    "wc_action_set_add", "wc_action_add", "wc_action_set_activate", "wc_action_digital",
+    "wc_action_analog", "wc_action_origin", "wc_action_glyph", "wc_input_device", "wc_input_revision",
+};
+
+static void v8_action_input_ptr(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    wc_host_t* host = _current_host;
+    args.GetReturnValue().Set((uint32_t)(host ? host->info.input_ptr : 0));
+}
+
+// Build (once per host) and add the action imports to env.
+static bool build_action_imports(wc_host_t* host, v8::Local<v8::Object> env) {
+    auto state = (v8_host_state*)host->v8_state;
+    if (state->actions.IsEmpty()) {
+        v8::Local<v8::Script> sc;
+        v8::Local<v8::Value> lib, wrap, obj;
+        if (!v8::Script::Compile(ctx(), v8str(WC_ACTIONS_LIB_JS)).ToLocal(&sc) || !sc->Run(ctx()).ToLocal(&lib) ||
+            !v8::Script::Compile(ctx(), v8str(WC_ACTIONS_HOST_JS)).ToLocal(&sc) || !sc->Run(ctx()).ToLocal(&wrap) ||
+            !wrap->IsFunction())
+            return false;
+        v8::Local<v8::Value> args[] = { lib, make_fn(v8_action_input_ptr) };
+        if (!wrap.As<v8::Function>()->Call(ctx(), ctx()->Global(), 2, args).ToLocal(&obj) || !obj->IsObject())
+            return false;
+        state->actions.Reset(g_isolate, obj.As<v8::Object>());
+    }
+    auto imps = state->actions.Get(g_isolate)->Get(ctx(), v8str("imports")).ToLocalChecked().As<v8::Object>();
+    for (const char* n : WC_ACTION_IMPORT_NAMES)
+        env->Set(ctx(), v8str(n), imps->Get(ctx(), v8str(n)).ToLocalChecked()).Check();
+    return true;
+}
+
+static void actions_call(wc_host_t* host, const char* method, int argc, v8::Local<v8::Value>* argv) {
+    auto state = (v8_host_state*)host->v8_state;
+    if (!state || state->actions.IsEmpty()) return;
+    auto obj = state->actions.Get(g_isolate);
+    v8::Local<v8::Value> fn;
+    if (!obj->Get(ctx(), v8str(method)).ToLocal(&fn) || !fn->IsFunction()) return;
+    v8::TryCatch tc(g_isolate);
+    (void)fn.As<v8::Function>()->Call(ctx(), obj, argc, argv);
+}
+
+#define WC_ACTIONS_SCOPE() \
+    if (!host || !host->v8_state) return; \
+    v8::Locker locker(g_isolate); \
+    v8::Isolate::Scope isolate_scope(g_isolate); \
+    v8::HandleScope handle_scope(g_isolate); \
+    v8::Context::Scope context_scope(ctx())
+
+static v8::Local<v8::Value> v8int(int v) { return v8::Integer::New(g_isolate, v); }
+
+extern "C" void wc_host_input_device(wc_host_t* host, int player, int device, int pad_family) {
+    WC_ACTIONS_SCOPE();
+    v8::Local<v8::Value> a[] = { v8int(player), v8int(device), v8int(pad_family) };
+    actions_call(host, "device", 3, a);
+}
+
+extern "C" void wc_host_input_key(wc_host_t* host, int input, const char* label, int hid_scancode) {
+    WC_ACTIONS_SCOPE();
+    v8::Local<v8::Value> a[] = { v8int(input), v8str(label ? label : ""), v8int(hid_scancode) };
+    actions_call(host, "key", 3, a);
+}
+
+extern "C" void wc_host_action_bind(wc_host_t* host, int player, int action, int input) {
+    WC_ACTIONS_SCOPE();
+    v8::Local<v8::Value> a[] = { v8int(player), v8int(action), v8int(input) };
+    actions_call(host, "bind", 3, a);
+}
+
+extern "C" int wc_host_actions(wc_host_t* host, int player, wc_host_action_t* out, int max) {
+    if (!host || !host->v8_state) return 0;
+    v8::Locker locker(g_isolate);
+    v8::Isolate::Scope isolate_scope(g_isolate);
+    v8::HandleScope handle_scope(g_isolate);
+    v8::Context::Scope context_scope(ctx());
+    auto state = (v8_host_state*)host->v8_state;
+    if (state->actions.IsEmpty()) return 0;
+    auto obj = state->actions.Get(g_isolate);
+    v8::TryCatch tc(g_isolate);
+    v8::Local<v8::Value> fn, res;
+    v8::Local<v8::Value> a[] = { v8::Integer::New(g_isolate, player) };
+    if (!obj->Get(ctx(), v8str("list")).ToLocal(&fn) || !fn->IsFunction() ||
+        !fn.As<v8::Function>()->Call(ctx(), obj, 1, a).ToLocal(&res) || !res->IsArray())
+        return 0;
+    auto arr = res.As<v8::Array>();
+    int n = (int)arr->Length();
+    for (int i = 0; i < n && i < max && out; i++) {
+        auto e = arr->Get(ctx(), i).ToLocalChecked().As<v8::Object>();
+        auto num = [&](const char* k) { return e->Get(ctx(), v8str(k)).ToLocalChecked()->Int32Value(ctx()).FromMaybe(0); };
+        auto str = [&](const char* k, char* dst, size_t cap) {
+            v8::String::Utf8Value u(g_isolate, e->Get(ctx(), v8str(k)).ToLocalChecked());
+            snprintf(dst, cap, "%s", *u ? *u : "");
+        };
+        str("name", out[i].name, sizeof out[i].name);
+        str("setName", out[i].set, sizeof out[i].set);
+        out[i].set_id = num("set");
+        v8::String::Utf8Value kind(g_isolate, e->Get(ctx(), v8str("kind")).ToLocalChecked());
+        out[i].kind = (*kind && strcmp(*kind, "analog") == 0) ? 1 : 0;
+        out[i].default_input = num("defaultInput");
+        out[i].input = num("input");
+        out[i].active = e->Get(ctx(), v8str("active")).ToLocalChecked()->BooleanValue(g_isolate) ? 1 : 0;
+    }
+    return n;
+}
+
+extern "C" void wc_host_input_changed(wc_host_t* host) {
+    WC_ACTIONS_SCOPE();
+    actions_call(host, "bump", 0, nullptr);
+}
+
 static v8::Local<v8::Object> build_thread_cfg(wc_host_t* host, const char* wasc_path) {
     auto cfg = v8::Object::New(g_isolate);
     auto index = v8::Object::New(g_isolate);
@@ -1498,6 +1652,10 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
             wc_log("wasmcart: failed to set up runtime code generation\n");
             return -1;
         }
+        if (!build_action_imports(host, env_imports)) {
+            wc_log("wasmcart: failed to set up input actions\n");
+            return -1;
+        }
     }
 
     imports->Set(ctx(), v8str("env"), env_imports).Check();
@@ -1632,7 +1790,8 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
             }
             v8::Local<v8::Value> f_args[] = {
                 wasm_module, imported_memory, build_thread_cfg(host, wasc_path),
-                v8str((std::string("const __wcJitLib = ") + WC_JIT_LIB_JS + ";\n" + WC_THREAD_WORKER_JS).c_str()),
+                v8str((std::string("const __wcJitLib = ") + WC_JIT_LIB_JS + ";\nconst __wcActionImports = (" +
+                       WC_ACTIONS_LIB_JS + ").WORKER_ACTION_IMPORTS;\n" + WC_THREAD_WORKER_JS).c_str()),
             };
             v8::Local<v8::Value> threads;
             if (!factory.As<v8::Function>()->Call(ctx(), ctx()->Global(), 4, f_args).ToLocal(&threads) ||
@@ -1740,6 +1899,7 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
         v8::Local<v8::Value> a[] = { instance, imported_memory.IsEmpty()
             ? v8::Undefined(g_isolate).As<v8::Value>() : imported_memory.As<v8::Value>() };
         jit_call(host, "attach", 2, a);
+        actions_call(host, "attach", 2, a);
     }
 
     // 5. Get exports
