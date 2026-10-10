@@ -15,7 +15,7 @@
  *   ./text_test <textauto.wasc> <active_off> <calls_off> <len_off> <buf_off>
  *
  * The offsets are the cart's debug-field addresses. They shift whenever the
- * fixture is recompiled (linking malloc alone moved them 16 bytes), so they are
+ * fixture is recompiled (linking an allocator alone moved them 16 bytes), so they are
  * passed in rather than baked -- read them with wasmcart's readDebugState().
  *
  * NOTE ON ORDERING: wc_host_enter_v8() must be called AFTER wc_host_create(),

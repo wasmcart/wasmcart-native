@@ -7,9 +7,10 @@
  * cart's wc_begin export, so the cart has to enable input itself. Text pushed
  * before that first frame must be dropped, which is what text_test checks.
  *
- * Rebuild (emcc + the wasmcart repo checkout for wasmcart.h / wc_cart.h):
+ * Rebuild (emcc + a wasmcart 0.32+ checkout for wasmcart.h / wc_cart.h; text
+ * reaches the cart through its wc_alloc/wc_free, which wasmcart.h defines):
  *   emcc test/textauto.c -O2 -I../wasmcart/include -s STANDALONE_WASM=1 --no-entry \
- *     -s EXPORTED_FUNCTIONS='["_wc_init","_wc_render","_wc_get_info","_wc_debug_state","_wc_on_text","_wc_begin","_wc_end","_malloc","_free"]' \
+ *     -s EXPORTED_FUNCTIONS='["_wc_init","_wc_render","_wc_get_info","_wc_debug_state","_wc_on_text","_wc_begin","_wc_end","_wc_alloc","_wc_free"]' \
  *     -s ERROR_ON_UNDEFINED_SYMBOLS=0 -o textauto.wasm
  *   npx wasmcart-pack --wasm textauto.wasm --name textauto -o test/textauto.wasc
  * then read the new debug-field offsets with wasmcart's readDebugState() and

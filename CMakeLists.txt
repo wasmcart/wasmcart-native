@@ -181,19 +181,30 @@ set(NATIVE_DAWN_DIR "" CACHE PATH "native-dawn install prefix for this platform"
 if(WASMCART_WGPU_JS_DIR AND NATIVE_DAWN_DIR)
     set(WGPU_OUT "$<TARGET_FILE_DIR:wasmcart-run>/wgpu")
     file(WRITE "${CMAKE_BINARY_DIR}/wgpu-package.json" "{ \"type\": \"module\" }\n")
+    # wasmcart's JS keeps its own layout (src/wgpu/ beside src/cartMemory.js,
+    # which host.js imports as ../cartMemory.js); wasmcart before 0.32 has no
+    # cartMemory.js.
+    set(WGPU_SHARED_JS "")
+    if(EXISTS "${WASMCART_WGPU_JS_DIR}/../cartMemory.js")
+        set(WGPU_SHARED_JS COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${WASMCART_WGPU_JS_DIR}/../cartMemory.js" "${WGPU_OUT}/src/")
+    endif()
     # A target of its own, run on every build: as a POST_BUILD step it only ran
     # when the executable relinked, so edited JS was silently left stale.
     add_custom_target(wasmcart-wgpu ALL
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${WGPU_OUT}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WGPU_OUT}/src/wgpu"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/src/wgpu_bridge.cjs"
+            "${NATIVE_DAWN_DIR}/lib/dawn.node"
+            "${NATIVE_DAWN_DIR}/lib/libwebgpu_dawn.so"
+            "${WGPU_OUT}/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${WASMCART_WGPU_JS_DIR}/host.js"
             "${WASMCART_WGPU_JS_DIR}/glue-loader.js"
             "${WASMCART_WGPU_JS_DIR}/emdawnwebgpu-glue.mjs"
             "${WASMCART_WGPU_JS_DIR}/emdawnwebgpu-glue-manifest.js"
-            "${NATIVE_DAWN_DIR}/lib/dawn.node"
-            "${NATIVE_DAWN_DIR}/lib/libwebgpu_dawn.so"
-            "${WGPU_OUT}/"
+            "${WGPU_OUT}/src/wgpu/"
+        ${WGPU_SHARED_JS}
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/wgpu-package.json" "${WGPU_OUT}/package.json"
         COMMENT "WebGPU support -> wgpu/")
     add_dependencies(wasmcart-wgpu wasmcart-run)

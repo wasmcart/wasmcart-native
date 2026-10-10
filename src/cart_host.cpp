@@ -59,13 +59,19 @@ struct v8_host_state {
     v8::Global<v8::Function> fn_wc_init;
     v8::Global<v8::Function> fn_wc_render;
     v8::Global<v8::Function> fn_initialize;
-    v8::Global<v8::Function> fn_malloc;
     v8::Global<v8::Function> fn_wc_set_seed;
     v8::Global<v8::Object> memory_obj;   // WebAssembly.Memory
 
     // WASI threads (wasi.thread-spawn). Empty for a cart that does not spawn.
     v8::Global<v8::Object> threads;      // { spawn, shutdown, count } from WC_THREADS_SPAWNER_JS
     v8::Global<v8::Function> thread_spawn_fn;
+
+    // Cart memory the host writes (wc_cart_alloc). Resolved from the exports
+    // on first use, not at load: a cart that never reaches such a path needs
+    // no allocator at all.
+    int alloc_kind = -1;                 // -1 unresolved, 0 none, 1 wc_alloc+wc_free
+    v8::Global<v8::Function> fn_alloc;   // wc_alloc
+    v8::Global<v8::Function> fn_free;    // wc_free
 };
 
 // ─── V8 helpers ──────────────────────────────────────────────────────────
@@ -790,11 +796,6 @@ static v8::Local<v8::Object> build_env_imports() {
 // the gl import object here and have gl_imports provide the callbacks.
 
 // Helpers for gl_imports.cpp to access V8 state
-extern "C" v8::Global<v8::Function>* wc_get_malloc_fn(wc_host_t* host) {
-    auto state = (v8_host_state*)host->v8_state;
-    return &state->fn_malloc;
-}
-
 extern "C" void wc_refresh_memory(wc_host_t* host) {
     refresh_memory(host);
 }
@@ -1694,7 +1695,6 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     auto fn_init = get_fn("wc_init");
     auto fn_render = get_fn("wc_render");
     auto fn_initialize = get_fn("_initialize");
-    auto fn_malloc = get_fn("malloc");
     auto fn_set_seed = get_fn("wc_set_seed");
 
     if (fn_get_info.IsEmpty() || fn_render.IsEmpty()) {
@@ -1706,7 +1706,6 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     state->fn_wc_render.Reset(g_isolate, fn_render);
     if (!fn_init.IsEmpty()) state->fn_wc_init.Reset(g_isolate, fn_init);
     if (!fn_initialize.IsEmpty()) state->fn_initialize.Reset(g_isolate, fn_initialize);
-    if (!fn_malloc.IsEmpty()) state->fn_malloc.Reset(g_isolate, fn_malloc);
     if (!fn_set_seed.IsEmpty()) state->fn_wc_set_seed.Reset(g_isolate, fn_set_seed);
 
     // Store fn pointers for gl_imports to use
@@ -1966,68 +1965,135 @@ extern "C" void wc_host_exit_v8(void) {
     delete g_persistent_locker; g_persistent_locker = nullptr;
 }
 
-// ─── Text input delivery ─────────────────────────────────────────────────
+// ─── Cart memory the host writes (wasmcart SPEC.md) ─────────────────────
+//
+// The host never owns any of the cart's memory, so every write it has to
+// place there (GL strings and mappings, text and network payloads) goes in a
+// block the cart allocates. There is NO fallback that writes anywhere else:
+// this host used to grow a "scratch" page onto the end of memory for carts
+// without malloc, and the JS host wrote at the top of memory, which is the
+// cart's live heap.
 
-/* Copy bytes into the cart's own heap so an export can be handed a pointer.
- * Uses the cart's malloc: writing into spare linear memory is how the JS host
- * once corrupted small carts, and there is no safe address to guess at.
- * Deliberately does not free -- a cart's malloc may have no matching free
- * exported, and leaking a few bytes per message beats calling one that is not
- * there. Carts that care copy out and reuse a static buffer. */
-static bool stage_bytes(wc_host_t* host, const uint8_t* data, uint32_t len,
-                        uint32_t* out_ptr) {
-    if (!len) return false;
+// Only the cart's wc_alloc + wc_free exports are used (wasmcart 0.32). A cart
+// exporting malloc/memalign/free but not both of these is treated exactly like
+// a cart with no allocator: its malloc is never called.
+static void resolve_cart_allocator(wc_host_t* host) {
     auto state = (v8_host_state*)host->v8_state;
+    if (state->alloc_kind >= 0) return;
+    state->alloc_kind = 0;
+    if (state->exports_obj.IsEmpty()) return;
+    auto exports = state->exports_obj.Get(g_isolate);
+    auto get = [&](const char* name) -> v8::Local<v8::Function> {
+        v8::Local<v8::Value> v;
+        if (exports->Get(ctx(), v8str(name)).ToLocal(&v) && v->IsFunction())
+            return v.As<v8::Function>();
+        return v8::Local<v8::Function>();
+    };
+    auto wc_alloc = get("wc_alloc"), wc_free = get("wc_free");
+    if (!wc_alloc.IsEmpty() && !wc_free.IsEmpty()) {
+        state->alloc_kind = 1;
+        state->fn_alloc.Reset(g_isolate, wc_alloc);
+        state->fn_free.Reset(g_isolate, wc_free);
+    }
+}
 
-    /* Preferred: the cart's own allocator. */
-    if (!state->fn_malloc.IsEmpty()) {
-        v8::Local<v8::Value> arg = v8::Integer::NewFromUnsigned(g_isolate, len);
-        v8::Local<v8::Value> ret;
-        if (state->fn_malloc.Get(g_isolate)
-                ->Call(ctx(), ctx()->Global(), 1, &arg).ToLocal(&ret)) {
-            uint32_t ptr = ret->Uint32Value(ctx()).FromMaybe(0);
-            if (ptr) {
-                refresh_memory(host);
-                if (host->memory && (uint64_t)ptr + len <= host->memory_size) {
-                    memcpy(host->memory + ptr, data, len);
-                    *out_ptr = ptr;
-                    return true;
-                }
-            }
-        }
+// Fail the cart: mark it trapped (the player stops it like any other trap) and
+// leave `msg` as a pending JS exception, which unwinds the cart's call into the
+// host import that needed the memory.
+static uint32_t cart_alloc_fail(wc_host_t* host, const std::string& msg) {
+    host->trapped = true;
+    g_isolate->ThrowException(v8::Exception::Error(v8str(msg.c_str())));
+    return 0;
+}
+
+extern "C" uint32_t wc_cart_alloc(wc_host_t* host, uint32_t size, uint32_t align,
+                                  const char* what) {
+    auto state = (v8_host_state*)host->v8_state;
+    if (size == 0) size = 1;
+    if (align == 0) align = 1;
+    resolve_cart_allocator(host);
+    if (state->alloc_kind != 1) {
+        return cart_alloc_fail(host, std::string("wasmcart: ") + what +
+            " must write into the cart's memory, but the cart does not export "
+            "wc_alloc/wc_free (its malloc, if any, is not used). Export "
+            "wc_alloc(size, align) and wc_free(ptr): wasmcart.h defines them for "
+            "C/C++ (include it), wasmcart's CMake helper exports them, and Rust "
+            "carts get them from the wasmcart-alloc crate. See SPEC.md, \"Cart "
+            "memory the host writes\".");
     }
 
-    /* No allocator -- plenty of hand-written carts export none. Grow a scratch
-     * page onto the END of linear memory instead. It has to be grown rather
-     * than carved out of existing memory: reusing the tail is how the JS host
-     * once silently overwrote a small cart's statics. */
-    if (host->scratch_base == 0) {
-        auto mem = state->memory_obj.Get(g_isolate);
-        v8::Local<v8::Value> grow_v;
-        if (!mem->Get(ctx(), v8str("grow")).ToLocal(&grow_v) || !grow_v->IsFunction())
-            return false;
-        v8::Local<v8::Value> pages = v8::Integer::New(g_isolate, 1);
-        v8::Local<v8::Value> prev;
-        v8::TryCatch tc(g_isolate);
-        if (!grow_v.As<v8::Function>()->Call(ctx(), mem, 1, &pages).ToLocal(&prev)) {
-            /* Cart pinned its maximum. Dropping the message is recoverable;
-             * writing somewhere unproven is not. */
-            if (!host->scratch_warned) {
-                host->scratch_warned = true;
-                wc_log("wasmcart: cannot stage a %u-byte payload -- the cart "
-                       "exports no malloc and its memory cannot grow. Messages "
-                       "will be dropped.\n", len);
-            }
-            return false;
-        }
-        host->scratch_base = prev->Uint32Value(ctx()).FromMaybe(0) * 65536u;
-        refresh_memory(host);
+    v8::Local<v8::Function> fn = state->fn_alloc.Get(g_isolate);
+    v8::Local<v8::Value> argv[2] = { v8::Integer::NewFromUnsigned(g_isolate, size),
+                                     v8::Integer::NewFromUnsigned(g_isolate, align) };
+    v8::Local<v8::Value> ret;
+    if (!fn->Call(ctx(), ctx()->Global(), 2, argv).ToLocal(&ret)) {
+        // The allocator itself trapped; its exception is already pending.
+        host->trapped = true;
+        return 0;
     }
-    if (len > 65536u) return false;
-    if (!host->memory || (uint64_t)host->scratch_base + len > host->memory_size)
+    uint32_t ptr = ret->Uint32Value(ctx()).FromMaybe(0);
+    refresh_memory(host);  // AFTER the call: the allocator may have grown memory
+
+    char call[96];
+    snprintf(call, sizeof call, "the cart's wc_alloc(%u, %u)", size, align);
+    char buf[512];
+    if (ptr == 0) {
+        snprintf(buf, sizeof buf, "wasmcart: %s: %s returned 0 (out of memory)", what, call);
+        return cart_alloc_fail(host, buf);
+    }
+    if (!host->memory || (uint64_t)ptr + size > host->memory_size) {
+        snprintf(buf, sizeof buf, "wasmcart: %s: %s returned 0x%x, which is outside its %u-byte memory",
+                 what, call, ptr, host->memory_size);
+        return cart_alloc_fail(host, buf);
+    }
+    if (ptr % align != 0) {
+        snprintf(buf, sizeof buf, "wasmcart: %s: %s returned 0x%x, which is not %u-byte aligned",
+                 what, call, ptr, align);
+        return cart_alloc_fail(host, buf);
+    }
+    return ptr;
+}
+
+extern "C" void wc_cart_free(wc_host_t* host, uint32_t ptr) {
+    if (!ptr) return;
+    auto state = (v8_host_state*)host->v8_state;
+    if (state->alloc_kind != 1) return;
+    v8::Local<v8::Value> a = v8::Integer::NewFromUnsigned(g_isolate, ptr);
+    (void)state->fn_free.Get(g_isolate)->Call(ctx(), ctx()->Global(), 1, &a);
+}
+
+// Copy a payload into a fresh cart allocation, hand it to `fn(prefix..., ptr,
+// len)`, then release it: the pointer is valid only for the call. Returns
+// false (cart trapped, error logged) when the cart cannot take the bytes.
+static bool deliver_payload(wc_host_t* host, const char* what, v8::Local<v8::Function> fn,
+                            v8::Local<v8::Value> prefix, bool has_prefix,
+                            const uint8_t* data, uint32_t len) {
+    v8::TryCatch tc(g_isolate);
+    uint32_t ptr = wc_cart_alloc(host, len, 1, what);
+    if (!ptr) {
+        v8::String::Utf8Value e(g_isolate, tc.Exception());
+        const char* msg = *e ? *e : "wasmcart: cart allocation failed";
+        if (!strncmp(msg, "Error: ", 7)) msg += 7;
+        wc_log("%s\n", msg);
         return false;
-    memcpy(host->memory + host->scratch_base, data, len);
-    *out_ptr = host->scratch_base;
+    }
+    memcpy(host->memory + ptr, data, len);
+    v8::Local<v8::Value> argv[3];
+    int argc = 0;
+    if (has_prefix) argv[argc++] = prefix;
+    argv[argc++] = v8::Integer::NewFromUnsigned(g_isolate, ptr);
+    argv[argc++] = v8::Integer::NewFromUnsigned(g_isolate, len);
+    (void)fn->Call(ctx(), ctx()->Global(), argc, argv);
+    if (tc.HasCaught()) {
+        v8::String::Utf8Value e(g_isolate, tc.Exception());
+        wc_log("wasmcart: cart's %s threw: %s\n", what, *e);
+        tc.Reset();
+    }
+    wc_cart_free(host, ptr);
+    if (tc.HasCaught()) {
+        v8::String::Utf8Value e(g_isolate, tc.Exception());
+        wc_log("wasmcart: cart's free threw: %s\n", *e);
+    }
     return true;
 }
 
@@ -2104,12 +2170,13 @@ static void deliver_peers(wc_host_t* host) {
         wc_peer_t* p = &host->peers[i];
         for (uint32_t k = 0; k < p->events_len; k++) {
             wc_peer_event_t* ev = &p->events[k];
+            if (host->trapped) { free(ev->data); continue; }
             v8::TryCatch tc(g_isolate);
             if (ev->type == WC_PEER_EV_CONNECT) {
                 p->state = WC_PEER_OPEN;
                 if (!on_connect.IsEmpty()) {
-                    /* name is passed through the cart's own memory, so it needs
-                     * somewhere to land. Reuse the scratch path used elsewhere. */
+                    /* The name is not passed (0, 0): it would need a cart
+                     * allocation; wc_peer_name() reads it on demand. */
                     v8::Local<v8::Value> argv[3] = {
                         v8::Integer::New(g_isolate, p->id),
                         v8::Integer::NewFromUnsigned(g_isolate, 0),
@@ -2119,15 +2186,10 @@ static void deliver_peers(wc_host_t* host) {
                 }
             } else if (ev->type == WC_PEER_EV_MESSAGE) {
                 if (!on_message.IsEmpty() && ev->data && ev->len) {
-                    uint32_t ptr = 0;
-                    if (stage_bytes(host, ev->data, ev->len, &ptr)) {
-                        v8::Local<v8::Value> argv[3] = {
-                            v8::Integer::New(g_isolate, p->id),
-                            v8::Integer::NewFromUnsigned(g_isolate, ptr),
-                            v8::Integer::NewFromUnsigned(g_isolate, ev->len),
-                        };
-                        (void)on_message->Call(ctx(), ctx()->Global(), 3, argv);
-                    }
+                    // Through the cart's allocator, freed after the call.
+                    (void)deliver_payload(host, "wc_peer_on_message", on_message,
+                                          v8::Integer::New(g_isolate, p->id), true,
+                                          ev->data, ev->len);
                 }
             } else if (ev->type == WC_PEER_EV_DISCONNECT) {
                 p->state = WC_PEER_CLOSED;
@@ -2204,8 +2266,9 @@ extern "C" int wc_host_text_input_active(wc_host_t* host) {
     return (host && host->text_active) ? 1 : 0;
 }
 
-// Hand each queued string to the cart's wc_on_text, staged through the cart's
-// own malloc. Called with a HandleScope already open.
+// Hand each queued string to the cart's wc_on_text, in a block the cart
+// allocates (wc_alloc) and freed after the call. Called with a HandleScope
+// already open.
 static void deliver_text(wc_host_t* host) {
     if (host->text_queue_len == 0) return;
 
@@ -2221,52 +2284,14 @@ static void deliver_text(wc_host_t* host) {
     }
     auto fn = val.As<v8::Function>();
 
-    if (state->fn_malloc.IsEmpty()) {
-        // No allocator: there is nowhere safe to stage the bytes. Writing into
-        // spare linear memory is how the JS host corrupted small carts, so drop
-        // instead and say why, once.
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            wc_log("wasmcart: cart exports wc_on_text but no malloc; text cannot "
-                   "be staged and will be dropped.\n");
-        }
-        host->text_queue_len = 0;
-        return;
-    }
-    auto malloc_fn = state->fn_malloc.Get(g_isolate);
-
     size_t pos = 0;
-    while (pos < host->text_queue_len) {
+    while (pos < host->text_queue_len && !host->trapped) {
         const char* str = host->text_queue + pos;
         size_t slen = strlen(str);
         pos += slen + 1;
         if (slen == 0) continue;
-
-        v8::Local<v8::Value> mlen = v8::Integer::NewFromUnsigned(g_isolate, (uint32_t)slen);
-        v8::Local<v8::Value> mret;
-        if (!malloc_fn->Call(ctx(), ctx()->Global(), 1, &mlen).ToLocal(&mret)) continue;
-        uint32_t ptr = mret->Uint32Value(ctx()).FromMaybe(0);
-        if (ptr == 0) continue;
-
-        refresh_memory(host);
-        if (!host->memory || ptr + slen > host->memory_size) continue;
-        memcpy(host->memory + ptr, str, slen);
-
-        v8::Local<v8::Value> argv[2] = {
-            v8::Integer::NewFromUnsigned(g_isolate, ptr),
-            v8::Integer::NewFromUnsigned(g_isolate, (uint32_t)slen),
-        };
-        v8::TryCatch tc(g_isolate);
-        v8::MaybeLocal<v8::Value> unused = fn->Call(ctx(), ctx()->Global(), 2, argv);
-        (void)unused;
-        if (tc.HasCaught()) {
-            v8::String::Utf8Value err(g_isolate, tc.Exception());
-            wc_log("wasmcart: cart's wc_on_text() threw: %s\n", *err);
-        }
-        // Deliberately not freeing: the cart's malloc may have no matching free
-        // exported, and leaking a few bytes per keystroke beats calling a
-        // free() that does not exist. Carts that care can reuse a static buffer.
+        (void)deliver_payload(host, "wc_on_text", fn, v8::Local<v8::Value>(), false,
+                              (const uint8_t*)str, (uint32_t)slen);
     }
     host->text_queue_len = 0;
 }
@@ -2403,7 +2428,20 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     deliver_peers(host);        // then into the cart, at a known point
     deliver_text(host);         // before render, like every other input
     deliver_wheel(host);        // frame total in, zeroed again after render
-    if (host->uses_wgpu) wgpu_call(host, "begin");
+    if (host->trapped) return;  // a payload the cart could not take (wc_cart_alloc)
+    if (host->uses_wgpu) {
+        // A WebGPU callback that could not get cart memory (no wc_alloc, or it
+        // failed) ran inside Node's event loop, where a throw reaches no
+        // caller; the glue kept the error, and it stops the cart here.
+        v8::Local<v8::Value> fatal = wgpu_call(host, "fatal");
+        if (fatal->IsString()) {
+            v8::String::Utf8Value msg(g_isolate, fatal);
+            wc_log("wasmcart: wc_render trapped: %s\n", *msg);
+            host->trapped = true;
+            return;
+        }
+        wgpu_call(host, "begin");
+    }
 
     auto result = state->fn_wc_render.Get(g_isolate)->Call(
         ctx(), ctx()->Global(), 0, nullptr);

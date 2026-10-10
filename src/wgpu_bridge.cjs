@@ -15,7 +15,8 @@ const path = require('node:path');
 
 module.exports = function createBridge(dir) {
   const dawn = require(path.join(dir, 'dawn.node'));
-  const host = require(path.join(dir, 'host.js'));
+  // wasmcart's src/ tree as CMake copies it (host.js imports ../cartMemory.js)
+  const host = require(path.join(dir, 'src', 'wgpu', 'host.js'));
   let gpu = null;
   const sessions = new Map();
 
@@ -65,6 +66,14 @@ module.exports = function createBridge(dir) {
 
     begin(id) {
       sessions.get(id)?.session.beginFrame();
+    },
+
+    // An error kept from an async WebGPU callback (a cart-memory allocation
+    // the cart could not satisfy, e.g. no wc_alloc/wc_free): its message, once,
+    // or null. The host stops the cart with it before the next frame.
+    fatal(id) {
+      const e = sessions.get(id)?.session.takeFatal?.();
+      return e ? String(e.message || e) : null;
     },
 
     // A window to present into. kind: xlib | wayland | win32 | metal-layer.

@@ -18,6 +18,8 @@ Options:
   --fullscreen    Start in fullscreen mode
   --fps           Show FPS counter
   --uncapped      Disable vsync and frame cap
+  --max-memory GB Stop the player (exit 3) once its resident memory passes GB
+                  (default 10; 0 = no limit)
   --msaa N        Multisampled window surface (N samples) for GL carts, a browser's antialias: true
   --no-direct     Always present GL carts through the redirect FBO (by default a cart
                   draws straight onto the window when it is exactly the cart's size)
@@ -102,8 +104,9 @@ cmake .. -DWASMCART_WGPU_JS_DIR=<wasmcart 0.32.0 or later>/src/wgpu \
 ```
 
 Every build then refreshes a `wgpu/` directory beside `wasmcart-run`: the
-bridge (`src/wgpu_bridge.cjs`), wasmcart's `host.js` and generated glue, and
-`dawn.node` + `libwebgpu_dawn.so`. Ship that directory with the binary.
+bridge (`src/wgpu_bridge.cjs`), wasmcart's `host.js` and generated glue (in
+`src/wgpu/`, beside the `src/cartMemory.js` they import), and `dawn.node` +
+`libwebgpu_dawn.so`. Ship that directory with the binary.
 Without it the player has no WebGPU: a WebGPU-only cart is refused at load
 with that reason, and a cart that also imports GL runs on GL (which is how
 the libretro and Android builds behave today).
@@ -245,10 +248,8 @@ browser talks to it here without change, and an embedder does nothing. For a
 host-supplied peer the embedder provides a send callback, feeds inbound bytes
 with `wc_host_peer_recv()`, and reports a drop with `wc_host_remove_peer()`.
 
-Payloads are staged into the cart's own `malloc` where it exports one, and
-otherwise into a page grown onto the END of linear memory. Never into spare
-existing memory: that is how the JS host once silently overwrote a small cart's
-statics.
+Payloads (like `wc_on_text` strings) are copied into a block the cart
+allocates and freed after the call; see "Cart memory the host writes" below.
 
 Async work (connections, messages, timers) advances once per frame from
 `wc_host_run_frame()`. An embedder driving async work outside a frame loop --
@@ -296,10 +297,15 @@ sh test/input_guard_test.sh   # keyboard is not also a gamepad while typing
 ./peer_test 8796 <granted.wasc> <ungranted.wasc>   # wc_peer_* end to end
 ./seed_test ../wasmcart/test/fixtures/detrng.wasc  # entropy differs, pinned reproduces
 sh test/wgpu_test.sh          # WebGPU carts (needs a build with WebGPU support)
+sh test/alloc_test.sh         # GL strings/mappings in the cart's wc_alloc blocks
+./alloc_payload_test test/alloc   # text and peer payloads through wc_alloc
+WASMCART_WGPU_DIR=$PWD/build/wgpu ./wgpu_alloc_test test/wgpu/wgpucart.wasc
+                              # WebGPU adapter info + mapped ranges through wc_alloc
+                              # (link it with -Wl,--dynamic-list=build/node-api-exports.list)
 ```
 
 `text_test` takes the cart's debug-field offsets as arguments because they move
-whenever the fixture is recompiled -- linking `malloc` alone shifted them 16
+whenever the fixture is recompiled -- linking an allocator alone shifted them 16
 bytes. Read them with wasmcart's `readDebugState()`.
 
 Two traps worth knowing before writing another one:
@@ -309,6 +315,26 @@ Two traps worth knowing before writing another one:
   anything, which reads like a host bug rather than a harness bug.
 - A static library does not relink automatically. Rebuilding `libwasmcart.a`
   and re-running a stale test binary produces confident wrong answers.
+
+### Cart memory the host writes
+
+Some host calls must hand the cart bytes at an address in its memory:
+`glGetString`/`glGetStringi` return a string pointer, `glMapBufferRange` a
+mapping, and `wc_on_text`/`wc_peer_on_message` take `(ptr, len)`. The host
+writes these only into blocks the cart allocates with its optional
+`wc_alloc(size, align)` export and releases with `wc_free(ptr)` (wasmcart 0.32;
+see wasmcart's SPEC.md, "Cart memory the host writes"; `wasmcart.h` defines and
+exports them). Every pointer the cart returns is checked against its memory and
+the alignment asked for before anything is written. A cart that never reaches
+such a path needs no allocator. One that does and lacks `wc_alloc`/`wc_free` is
+stopped at that call with an error naming it -- including a cart built before
+0.32 that exports only `malloc`/`free`: the host never calls a cart's `malloc`
+(rebuild it against 0.32's `wasmcart.h`). A WebGPU callback that hits this
+inside Node's event loop stops the cart on the next frame. GL strings
+are allocated once each and never freed; a mapping is allocated at map and
+freed at unmap; a payload is freed when the cart's handler returns.
+(`wc_cart_alloc` is in `cart_host.cpp`; `test/alloc_test.sh` and
+`test/alloc_payload_test.c` pin it.)
 
 ### GL Import Bridge (gl_imports.cpp)
 

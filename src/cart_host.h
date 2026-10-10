@@ -127,12 +127,6 @@ struct wc_host {
     uint32_t   peer_count;
     uint32_t   peer_cap;
     int32_t    peer_next_id;
-
-    // Grown-on-demand staging page for host->cart payloads when the cart
-    // exports no malloc. Grown past everything the cart owns so it cannot
-    // alias cart data. 0 = not yet claimed.
-    uint32_t scratch_base;
-    bool     scratch_warned;
 };
 
 // ─── Asset loading ─────────────────────────────────────────────────────
@@ -149,6 +143,18 @@ int wc_parse_manifest(wc_host_t* host, const char* json, size_t len);
 // ─── GL imports ────────────────────────────────────────────────────────
 
 void wc_gl_imports_init(wc_host_t* host);
+
+// ─── Cart memory the host writes (wasmcart SPEC.md) ─────────────────────
+//
+// Every byte the host must place in the cart's memory (glGetString strings,
+// glMapBufferRange mappings, wc_on_text and wc_peer_on_message payloads) goes
+// in a block the CART allocates with its wc_alloc(size, align)/wc_free(ptr)
+// exports (never its malloc: a cart without both is stopped). Call with the
+// usual V8 scopes open. wc_cart_alloc returns a pointer checked against the
+// cart's memory (re-read after the call), or 0 with the cart marked trapped
+// and a JS exception pending whose message names `what`.
+uint32_t wc_cart_alloc(wc_host_t* host, uint32_t size, uint32_t align, const char* what);
+void     wc_cart_free(wc_host_t* host, uint32_t ptr);
 
 // ─── WASI stubs ────────────────────────────────────────────────────────
 // (handled in cart_host.cpp for V8 version)
