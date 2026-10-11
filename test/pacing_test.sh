@@ -7,16 +7,19 @@
 # Run: sh test/pacing_test.sh [path/to/wasmcart-run]
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN="${1:-$HERE/../build/wasmcart-run}"
-LOG="${TMPDIR:-/tmp}/wasmcart-pacing-test.$$.log"
+DIR="${TMPDIR:-/tmp}/wasmcart-pacing-test.$$"
+LOG="$DIR/run.log"
+mkdir -p "$DIR"
+cp "$HERE/snake.wasc" "$DIR/snake.wasc"  # its .sav is written beside it
 export SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy WASMCART_NO_WGPU=1
-"$RUN" "$HERE/snake.wasc" --fps > "$LOG" 2>&1 &
+"$RUN" "$DIR/snake.wasc" --fps > "$LOG" 2>&1 &
 pid=$!
 sleep 11
 kill -INT $pid 2>/dev/null
 wait $pid
 # the second 5-second window (the first has the load in it)
 fps=$(grep 'FPS:' "$LOG" | sed -n 2p | sed 's/.*FPS: //')
-rm -f "$LOG"
+rm -rf "$DIR"
 if [ -z "$fps" ]; then echo "*** FAIL no FPS line"; exit 1; fi
 ok=$(node -e "console.log(+process.argv[1] >= 58.5 && +process.argv[1] <= 61 ? 1 : 0)" "$fps")
 if [ "$ok" = 1 ]; then echo "  ok    paced to 60 Hz without vsync ($fps fps)"; echo "all pacing checks passed"; exit 0; fi

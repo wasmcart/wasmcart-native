@@ -12,6 +12,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN="${1:-$HERE/../build/wasmcart-run}"
 OUT="${TMPDIR:-/tmp}/wasmcart-code-cache-test.$$"
 mkdir -p "$OUT/cache"
+cp "$HERE/snake.wasc" "$OUT/snake.wasc"  # its .sav is written beside it
 fail=0
 export SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy WASMCART_NO_WGPU=1 XDG_CACHE_HOME="$OUT/cache"
 export WASMCART_V8_FLAGS="--wasm-caching-threshold=1"
@@ -20,7 +21,7 @@ check() {  # check WHAT GOT WANT
 }
 # run NAME SECONDS: snake for a while, then stopped
 run() {
-  "$RUN" "$HERE/snake.wasc" --uncapped > "$OUT/$1.log" 2>&1 &
+  "$RUN" "$OUT/snake.wasc" --uncapped > "$OUT/$1.log" 2>&1 &
   pid=$!
   sleep "$2"
   kill -INT $pid 2>/dev/null
