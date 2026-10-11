@@ -18,11 +18,12 @@ env:
   # with wasmcart-$WASMCART_VERSION.tgz) comes first; only then push/tag this
   # repo, or the WebGPU jobs fail at "Fetch WebGPU support". native-dawn 0.1.4
   # is the first with objectHandle (src/wgpu_imports.cpp) and the
-  # shared-texture features (src/wgpu_gl_share.cpp); its release, and its
+  # shared-texture features (src/wgpu_gl_share.cpp), 0.1.5 the first whose
+  # objectHandle survives a Proxy (the cart's adapter); its release, and its
   # hashes pinned in the fetch script, also come first.
-  NATIVE_DAWN_VERSION: 0.1.4
-  WASMCART_VERSION: 0.34.0
-  WASMCART_SPEC: https://github.com/wasmcart/wasmcart/releases/download/v0.34.0/wasmcart-0.34.0.tgz
+  NATIVE_DAWN_VERSION: 0.1.5
+  WASMCART_VERSION: 0.34.2
+  WASMCART_SPEC: https://github.com/wasmcart/wasmcart/releases/download/v0.34.2/wasmcart-0.34.2.tgz
 
 jobs:
   build-linux-x86_64:
