@@ -3095,9 +3095,7 @@ static double prof_gc_ms = 0, prof_gc_t0 = 0;
 static uint32_t prof_gc_count = 0;
 static bool prof_gc_hooked = false;
 static double prof_now_ms() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec * 1e-6;
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 static void prof_gc_begin(v8::Isolate*, v8::GCType, v8::GCCallbackFlags) { prof_gc_t0 = prof_now_ms(); }
 static void prof_gc_end(v8::Isolate*, v8::GCType, v8::GCCallbackFlags) {

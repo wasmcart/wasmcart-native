@@ -3,6 +3,7 @@
 // Native GLES uses integer IDs for GL objects — no object tables needed.
 // V8 FunctionCallback wrappers instead of wasmtime callbacks.
 
+#include <chrono>
 #include "v8.h"
 extern "C" {
 #include "cart_host.h"
@@ -163,13 +164,11 @@ const char* wc_gl_prof_max_name = NULL;
 }
 struct GLProfScope {
     const char* name;
-    struct timespec t0;
-    explicit GLProfScope(const char* n) : name(n) { if (wc_gl_prof_on) clock_gettime(CLOCK_MONOTONIC, &t0); }
+    std::chrono::steady_clock::time_point t0;
+    explicit GLProfScope(const char* n) : name(n) { if (wc_gl_prof_on) t0 = std::chrono::steady_clock::now(); }
     ~GLProfScope() {
         if (!wc_gl_prof_on) return;
-        struct timespec t1;
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        double ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-6;
+        double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         wc_gl_prof_ms += ms;
         wc_gl_prof_calls++;
         if (ms > wc_gl_prof_max_ms) { wc_gl_prof_max_ms = ms; wc_gl_prof_max_name = name; }
