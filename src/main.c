@@ -607,6 +607,16 @@ int main(int argc, char* argv[]) {
     }
 
     // 5. Init SDL
+#if defined(__linux__)
+    /* A WebGPU cart's window is a Wayland window where the session has one.
+     * SDL 2 prefers X11, and on a Wayland desktop running Xwayland a Vulkan
+     * surface on an X11 window presents through Xwayland: Rider ran at 1 fps
+     * there and at the display's rate on a Wayland window of the same session
+     * (Mesa 26, Mutter). GL carts keep X11 (egl_context.c binds X11 windows).
+     * SDL_VIDEODRIVER, when set, decides. */
+    if (is_wgpu && getenv("WAYLAND_DISPLAY") && !getenv("SDL_VIDEODRIVER"))
+        SDL_SetHint(SDL_HINT_VIDEODRIVER, "wayland,x11");
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
         fprintf(stderr, "wasmcart: SDL_Init failed: %s\n", SDL_GetError());
         wc_host_destroy(host);
@@ -705,9 +715,9 @@ int main(int argc, char* argv[]) {
                 attached = wc_host_wgpu_attach_window(host, "metal-layer", 0, (uint64_t)(uintptr_t)layer, !uncapped);
         }
 #endif
-        fprintf(stderr, attached == 0 ? "wasmcart: rendering %ux%u via WebGPU\n"
-                                      : "wasmcart: rendering %ux%u via WebGPU, no window surface (nothing presented)\n",
-                cart_w, cart_h);
+        fprintf(stderr, attached == 0 ? "wasmcart: rendering %ux%u via WebGPU (%s window)\n"
+                                      : "wasmcart: rendering %ux%u via WebGPU, no window surface (nothing presented; %s)\n",
+                cart_w, cart_h, SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "no video driver");
         vsync_paced = attached == 0 && !uncapped;  // FIFO: present waits for the display
     }
     // 2D carts: destroy EGL (conflicts with SDL renderer), use SDL accelerated renderer
