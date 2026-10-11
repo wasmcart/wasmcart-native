@@ -1467,6 +1467,8 @@ static void free_node_before_dawn(void) {
     g_setup.reset();
 }
 static std::string g_wgpu_unavailable;
+// The cart loaded last: its adapter, or why it has no WebGPU (a dual cart).
+static std::string g_wgpu_adapter, g_wgpu_why;
 static bool g_wgpu_probed = false;
 
 static bool is_wgpu_import_name(const char* n) {
@@ -1676,6 +1678,8 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     };
     auto module_imports = list_imports();
     host->cart_imports_gl = host->cart_imports_wgpu = host->uses_wgpu = false;
+    g_wgpu_adapter.clear();
+    g_wgpu_why.clear();
     for (uint32_t i = 0; i < module_imports->Length(); i++) {
         auto e = module_imports->Get(ctx(), i).ToLocalChecked().As<v8::Object>();
         v8::String::Utf8Value mod(g_isolate, e->Get(ctx(), v8str("module")).ToLocalChecked());
@@ -1690,8 +1694,10 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     v8::Local<v8::Object> wgpu_env;
     if (host->cart_imports_wgpu) {
         std::string why;
-        auto bridge = wgpu_bridge();
-        if (bridge.IsEmpty()) {
+        auto bridge = (opts && opts->wgpu_disabled) ? v8::Local<v8::Object>() : wgpu_bridge();
+        if (opts && opts->wgpu_disabled) {
+            why = "WebGPU is turned off for this cart";
+        } else if (bridge.IsEmpty()) {
             why = g_wgpu_unavailable;
         } else {
             uint32_t w = (opts && opts->preferred_width) ? opts->preferred_width : (host->manifest.width ? host->manifest.width : 640);
@@ -1705,10 +1711,12 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
                 wc_log("wasmcart: this cart is a WebGPU cart, but this host cannot provide WebGPU: %s\n", why.c_str());
                 return -1;
             }
+            g_wgpu_why = why;
             wc_log("wasmcart: no WebGPU (%s); the cart also imports GL, so it runs on GL\n", why.c_str());
         } else {
             v8::String::Utf8Value adapter(g_isolate, wgpu_call(host, "adapterName"));
-            wc_log("wasmcart: WebGPU cart, on %s\n", *adapter ? *adapter : "?");
+            g_wgpu_adapter = *adapter ? *adapter : "?";
+            wc_log("wasmcart: WebGPU cart, on %s\n", g_wgpu_adapter.c_str());
         }
     }
 
@@ -3043,6 +3051,12 @@ extern "C" void wc_host_wgpu_frame_release(wc_host_t* host) {
     v8::HandleScope hs(g_isolate);
     v8::Context::Scope cs(ctx());
     wgpu_call(host, "readRelease");
+}
+extern "C" const char* wc_host_wgpu_adapter(wc_host_t* host) {
+    return host->uses_wgpu ? g_wgpu_adapter.c_str() : "";
+}
+extern "C" const char* wc_host_wgpu_unavailable_reason(wc_host_t* host) {
+    return host->uses_wgpu ? "" : g_wgpu_why.c_str();
 }
 extern "C" int wc_host_wgpu_frame_size(wc_host_t* host, uint32_t* w, uint32_t* h) {
     if (!host->uses_wgpu) return -1;

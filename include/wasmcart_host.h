@@ -211,6 +211,10 @@ typedef struct {
     // get -1, and wc_host_jit_notice() returns the notice the embedder MUST
     // show the user, where they are looking, once the cart has asked.
     bool     jit_disabled;
+    // Act as a host without WebGPU for this cart (as WASMCART_NO_WGPU=1
+    // does): a dual GL + WebGPU cart runs on GL, a WebGPU-only cart is
+    // refused. A user's "use GL" setting.
+    bool     wgpu_disabled;
 } wc_host_options_t;
 
 // ─── Host API ──────────────────────────────────────────────────────────────
@@ -445,6 +449,12 @@ const char* wc_host_gpu_lost(wc_host_t* host);
  * may lay out its own project size. Returns 0 and fills w/h, or -1 (not a
  * WebGPU cart, or no surface configured yet). */
 int wc_host_wgpu_frame_size(wc_host_t* host, uint32_t* w, uint32_t* h);
+/* The adapter a WebGPU cart runs on (as logged), or "" for one that does not. */
+const char* wc_host_wgpu_adapter(wc_host_t* host);
+/* Why this host has no WebGPU for the cart loaded last, which imports it
+ * (a dual cart that runs on GL), or "" when it has WebGPU or the cart does
+ * not import it. */
+const char* wc_host_wgpu_unavailable_reason(wc_host_t* host);
 /* Pipelined readback, for a host that shows a WebGPU cart's frame through
  * another API (the libretro core's GL framebuffer) without waiting on the GPU
  * every frame. After wc_host_run_frame, wc_host_wgpu_frame_queue starts
