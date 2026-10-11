@@ -89,6 +89,7 @@ struct wc_host {
 
     // Error state
     bool trapped;
+    char trap_reason[512];  // why, for an embedder to show (wc_host_trap_reason)
     bool init_deferred;  // _initialize/wc_init not yet called
     wc_host_options_t deferred_opts;  // saved for finish_init
 

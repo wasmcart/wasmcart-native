@@ -2848,7 +2848,9 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
             fn.As<v8::Function>()->Call(ctx(), threads, 0, nullptr).ToLocal(&r)) {
             int32_t dead = r->Int32Value(ctx()).FromMaybe(0);
             if (dead) {
-                wc_log("wasmcart: cart thread %d died; the cart's thread pool is a worker short, so the cart is stopped\n", dead);
+                snprintf(host->trap_reason, sizeof host->trap_reason,
+                         "cart thread %d died; the cart's thread pool is a worker short, so the cart is stopped", dead);
+                wc_log("wasmcart: %s\n", host->trap_reason);
                 host->trapped = true;
                 return;
             }
@@ -2873,6 +2875,7 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
         if (fatal->IsString()) {
             v8::String::Utf8Value msg(g_isolate, fatal);
             wc_log("wasmcart: wc_render trapped: %s\n", *msg);
+            snprintf(host->trap_reason, sizeof host->trap_reason, "%s", *msg ? *msg : "WebGPU error");
             host->trapped = true;
             return;
         }
@@ -2885,6 +2888,7 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     if (result.IsEmpty() && try_catch.HasCaught()) {
         v8::String::Utf8Value err(g_isolate, try_catch.Exception());
         wc_log( "wasmcart: wc_render trapped: %s\n", *err);
+        snprintf(host->trap_reason, sizeof host->trap_reason, "%s", *err ? *err : "the cart trapped");
         host->trapped = true;
         return;
     }
@@ -3014,6 +3018,10 @@ extern "C" uint8_t* wc_host_get_save_data(wc_host_t* host, uint32_t* size) {
 }
 
 // ─── GL / Info (unchanged) ──────────────────────────────────────────────
+
+extern "C" const char* wc_host_trap_reason(wc_host_t* host) {
+    return host->trapped && host->trap_reason[0] ? host->trap_reason : NULL;
+}
 
 extern "C" bool wc_host_uses_gl(wc_host_t* host) { return host->uses_gl; }
 extern "C" bool wc_host_uses_wgpu(wc_host_t* host) { return host->uses_wgpu; }

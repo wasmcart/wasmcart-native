@@ -550,6 +550,10 @@ void wc_host_set_gl_loader(wc_host_t* host, wc_gl_get_proc_fn loader);
 
 // Error state
 bool wc_host_has_trapped(wc_host_t* host);
+/* Why the cart stopped (wc_render threw, a cart thread died, a WebGPU error
+ * from a callback), once it has trapped; NULL otherwise or when there is no
+ * message. For an embedder to show the player. */
+const char* wc_host_trap_reason(wc_host_t* host);
 
 // Info
 const wc_cart_info_t* wc_host_get_cart_info(wc_host_t* host);
