@@ -22,6 +22,7 @@ extern "C" {
 #include "wc_log.h"
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 // V8 context accessor — defined in cart_host.cpp
 extern v8::Isolate* g_isolate;
@@ -35,6 +36,20 @@ static GLuint _redirect_tex = 0;
 static uint32_t _redirect_w = 0, _redirect_h = 0;
 // Cart VAO — isolates cart's VAO 0 usage from host (RetroArch uses VAO 0 for overlays)
 static GLuint _cart_vao = 0;
+
+// Every GL object the cart creates, until it deletes it, so that
+// wc_gl_release_cart_objects can delete what a cart leaves behind when the
+// host drops it while the GL context lives on (a libretro core restarting the
+// cart in the frontend's context): without it each restart kept the old
+// cart's textures, buffers and programs.
+enum { _OBJ_BUF, _OBJ_TEX, _OBJ_FBO, _OBJ_RBO, _OBJ_VAO, _OBJ_PROG, _OBJ_SHADER, _OBJ_SAMPLER, _OBJ_QUERY, _OBJ_SYNC, _OBJ_N };
+static std::unordered_set<uint32_t> _cart_objs[_OBJ_N];
+static void _track(int type, GLsizei n, const GLuint* ids) {
+    if (ids) for (GLsizei i = 0; i < n; i++) if (ids[i]) _cart_objs[type].insert(ids[i]);
+}
+static void _untrack(int type, GLsizei n, const GLuint* ids) {
+    if (ids) for (GLsizei i = 0; i < n; i++) _cart_objs[type].erase(ids[i]);
+}
 // The VAO the cart most recently bound (already mapped: cart's 0 -> _cart_vao).
 // Element-array binding is VAO state, so a host-side VAO switch between frames
 // must put THIS back, not _cart_vao: an engine that binds its own VAO once at
@@ -339,8 +354,8 @@ GL_REG(glLineWidth, 1, 0, glLineWidth(A_F32(0)))
 
 // ─── Buffers ──────────────────────────────────────────────────────────────
 
-GL_REG(glGenBuffers, 2, 0, glGenBuffers(A_I32(0), (GLuint*)wptr(A_U32(1))))
-GL_REG(glDeleteBuffers, 2, 0, glDeleteBuffers(A_I32(0), (const GLuint*)wptr(A_U32(1))))
+GL_REG(glGenBuffers, 2, 0, { glGenBuffers(A_I32(0), (GLuint*)wptr(A_U32(1))); _track(_OBJ_BUF, A_I32(0), (GLuint*)wptr(A_U32(1))); })
+GL_REG(glDeleteBuffers, 2, 0, { _untrack(_OBJ_BUF, A_I32(0), (const GLuint*)wptr(A_U32(1))); glDeleteBuffers(A_I32(0), (const GLuint*)wptr(A_U32(1))); })
 GL_REG(glBindBuffer, 2, 0, {
     GLenum target = A_U32(0);
     GLuint buf = A_U32(1);
@@ -366,8 +381,8 @@ GL_REG(glIsBuffer, 1, 1, R_I32(glIsBuffer(A_U32(0))))
 
 // ─── Textures ─────────────────────────────────────────────────────────────
 
-GL_REG(glGenTextures, 2, 0, glGenTextures(A_I32(0), (GLuint*)wptr(A_U32(1))))
-GL_REG(glDeleteTextures, 2, 0, glDeleteTextures(A_I32(0), (const GLuint*)wptr(A_U32(1))))
+GL_REG(glGenTextures, 2, 0, { glGenTextures(A_I32(0), (GLuint*)wptr(A_U32(1))); _track(_OBJ_TEX, A_I32(0), (GLuint*)wptr(A_U32(1))); })
+GL_REG(glDeleteTextures, 2, 0, { _untrack(_OBJ_TEX, A_I32(0), (const GLuint*)wptr(A_U32(1))); glDeleteTextures(A_I32(0), (const GLuint*)wptr(A_U32(1))); })
 GL_REG(glBindTexture, 2, 0, glBindTexture(A_U32(0), A_U32(1)))
 GL_REG(glActiveTexture, 1, 0, glActiveTexture(A_U32(0)))
 GL_REG(glTexParameteri, 3, 0, glTexParameteri(A_U32(0), A_U32(1), A_I32(2)))
@@ -418,8 +433,8 @@ GL_REG(glTexStorage3D, 6, 0, glTexStorage3D(A_U32(0), A_I32(1), A_U32(2), A_I32(
 
 // ─── Shaders ──────────────────────────────────────────────────────────────
 
-GL_REG(glCreateShader, 1, 1, R_I32(glCreateShader(A_U32(0))))
-GL_REG(glDeleteShader, 1, 0, glDeleteShader(A_U32(0)))
+GL_REG(glCreateShader, 1, 1, { GLuint o = glCreateShader(A_U32(0)); if (o) _cart_objs[_OBJ_SHADER].insert(o); R_I32(o); })
+GL_REG(glDeleteShader, 1, 0, { _cart_objs[_OBJ_SHADER].erase(A_U32(0)); glDeleteShader(A_U32(0)); })
 GL_REG(glCompileShader, 1, 0, {
     GLuint shader = A_U32(0);
     glCompileShader(shader);
@@ -465,8 +480,8 @@ GL_REG(glGetShaderInfoLog, 4, 0, glGetShaderInfoLog(A_U32(0), A_I32(1), A_U32(2)
 
 // ─── Programs ─────────────────────────────────────────────────────────────
 
-GL_REG(glCreateProgram, 0, 1, R_I32(glCreateProgram()))
-GL_REG(glDeleteProgram, 1, 0, glDeleteProgram(A_U32(0)))
+GL_REG(glCreateProgram, 0, 1, { GLuint o = glCreateProgram(); if (o) _cart_objs[_OBJ_PROG].insert(o); R_I32(o); })
+GL_REG(glDeleteProgram, 1, 0, { _cart_objs[_OBJ_PROG].erase(A_U32(0)); glDeleteProgram(A_U32(0)); })
 GL_REG(glAttachShader, 2, 0, glAttachShader(A_U32(0), A_U32(1)))
 GL_REG(glDetachShader, 2, 0, glDetachShader(A_U32(0), A_U32(1)))
 GL_REG(glLinkProgram, 1, 0, {
@@ -567,12 +582,13 @@ GL_REG(glVertexAttribDivisor, 2, 0, glVertexAttribDivisor(A_U32(0), A_U32(1)))
 
 // ─── VAOs ─────────────────────────────────────────────────────────────────
 
-GL_REG(glGenVertexArrays, 2, 0, glGenVertexArrays(A_I32(0), (GLuint*)wptr(A_U32(1))))
+GL_REG(glGenVertexArrays, 2, 0, { glGenVertexArrays(A_I32(0), (GLuint*)wptr(A_U32(1))); _track(_OBJ_VAO, A_I32(0), (GLuint*)wptr(A_U32(1))); })
 GL_REG(glDeleteVertexArrays, 2, 0, {
     GLsizei n = A_I32(0);
     const GLuint* arrays = (const GLuint*)wptr(A_U32(1));
     // Deleting the bound VAO reverts the binding to 0 (GL semantics).
     if (arrays) for (GLsizei i = 0; i < n; i++) if (arrays[i] == _cart_bound_vao) _cart_bound_vao = 0;
+    _untrack(_OBJ_VAO, n, arrays);
     glDeleteVertexArrays(n, arrays);
 })
 GL_REG(glBindVertexArray, 1, 0, {
@@ -702,8 +718,8 @@ GL_REG(glTransformFeedbackVaryings, 4, 0, {
     glTransformFeedbackVaryings(prog, n, names, A_U32(3));
 })
 GL_REG(glGetSynciv, 5, 0, glGetSynciv((GLsync)(uintptr_t)A_U32(0), A_U32(1), A_I32(2), (GLsizei*)wptr(A_U32(3)), (GLint*)wptr(A_U32(4))))
-GL_REG(glGenQueries, 2, 0, glGenQueries(A_I32(0), (GLuint*)wptr(A_U32(1))))
-GL_REG(glDeleteQueries, 2, 0, glDeleteQueries(A_I32(0), (const GLuint*)wptr(A_U32(1))))
+GL_REG(glGenQueries, 2, 0, { glGenQueries(A_I32(0), (GLuint*)wptr(A_U32(1))); _track(_OBJ_QUERY, A_I32(0), (GLuint*)wptr(A_U32(1))); })
+GL_REG(glDeleteQueries, 2, 0, { _untrack(_OBJ_QUERY, A_I32(0), (const GLuint*)wptr(A_U32(1))); glDeleteQueries(A_I32(0), (const GLuint*)wptr(A_U32(1))); })
 
 GL_REG(glClearBufferfv, 3, 0, {
     glClearBufferfv(A_U32(0), A_I32(1), (const GLfloat*)wptr(A_U32(2)));
@@ -715,8 +731,9 @@ static int _cart_uses_fbos = 0;
 GL_REG(glGenFramebuffers, 2, 0, {
     _cart_uses_fbos = 1;
     glGenFramebuffers(A_I32(0), (GLuint*)wptr(A_U32(1)));
+    _track(_OBJ_FBO, A_I32(0), (GLuint*)wptr(A_U32(1)));
 })
-GL_REG(glDeleteFramebuffers, 2, 0, glDeleteFramebuffers(A_I32(0), (const GLuint*)wptr(A_U32(1))))
+GL_REG(glDeleteFramebuffers, 2, 0, { _untrack(_OBJ_FBO, A_I32(0), (const GLuint*)wptr(A_U32(1))); glDeleteFramebuffers(A_I32(0), (const GLuint*)wptr(A_U32(1))); })
 // FBO redirect: capture what the cart renders to FBO 0
 
 static GLuint _redirect_rbo = 0;
@@ -808,24 +825,24 @@ GL_REG(glReadPixels, 7, 0, glReadPixels(A_I32(0), A_I32(1), A_I32(2), A_I32(3), 
 
 // ─── Renderbuffers ────────────────────────────────────────────────────────
 
-GL_REG(glGenRenderbuffers, 2, 0, glGenRenderbuffers(A_I32(0), (GLuint*)wptr(A_U32(1))))
-GL_REG(glDeleteRenderbuffers, 2, 0, glDeleteRenderbuffers(A_I32(0), (const GLuint*)wptr(A_U32(1))))
+GL_REG(glGenRenderbuffers, 2, 0, { glGenRenderbuffers(A_I32(0), (GLuint*)wptr(A_U32(1))); _track(_OBJ_RBO, A_I32(0), (GLuint*)wptr(A_U32(1))); })
+GL_REG(glDeleteRenderbuffers, 2, 0, { _untrack(_OBJ_RBO, A_I32(0), (const GLuint*)wptr(A_U32(1))); glDeleteRenderbuffers(A_I32(0), (const GLuint*)wptr(A_U32(1))); })
 GL_REG(glBindRenderbuffer, 2, 0, glBindRenderbuffer(A_U32(0), A_U32(1)))
 GL_REG(glRenderbufferStorage, 4, 0, glRenderbufferStorage(A_U32(0), A_U32(1), A_I32(2), A_I32(3)))
 GL_REG(glRenderbufferStorageMultisample, 5, 0, glRenderbufferStorageMultisample(A_U32(0), A_I32(1), A_U32(2), A_I32(3), A_I32(4)))
 
 // ─── Samplers ─────────────────────────────────────────────────────────────
 
-GL_REG(glGenSamplers, 2, 0, glGenSamplers(A_I32(0), (GLuint*)wptr(A_U32(1))))
-GL_REG(glDeleteSamplers, 2, 0, glDeleteSamplers(A_I32(0), (const GLuint*)wptr(A_U32(1))))
+GL_REG(glGenSamplers, 2, 0, { glGenSamplers(A_I32(0), (GLuint*)wptr(A_U32(1))); _track(_OBJ_SAMPLER, A_I32(0), (GLuint*)wptr(A_U32(1))); })
+GL_REG(glDeleteSamplers, 2, 0, { _untrack(_OBJ_SAMPLER, A_I32(0), (const GLuint*)wptr(A_U32(1))); glDeleteSamplers(A_I32(0), (const GLuint*)wptr(A_U32(1))); })
 GL_REG(glBindSampler, 2, 0, glBindSampler(A_U32(0), A_U32(1)))
 GL_REG(glSamplerParameteri, 3, 0, glSamplerParameteri(A_U32(0), A_U32(1), A_I32(2)))
 GL_REG(glSamplerParameterf, 3, 0, glSamplerParameterf(A_U32(0), A_U32(1), A_F32(2)))
 
 // ─── Sync ─────────────────────────────────────────────────────────────────
 
-GL_REG(glFenceSync, 2, 1, { GLsync s = glFenceSync(A_U32(0), A_U32(1)); R_I32((int32_t)(uintptr_t)s); })
-GL_REG(glDeleteSync, 1, 0, glDeleteSync((GLsync)(uintptr_t)A_U32(0)))
+GL_REG(glFenceSync, 2, 1, { GLsync s = glFenceSync(A_U32(0), A_U32(1)); if (s) _cart_objs[_OBJ_SYNC].insert((uint32_t)(uintptr_t)s); R_I32((int32_t)(uintptr_t)s); })
+GL_REG(glDeleteSync, 1, 0, { _cart_objs[_OBJ_SYNC].erase(A_U32(0)); glDeleteSync((GLsync)(uintptr_t)A_U32(0)); })
 GL_REG(glClientWaitSync, 3, 1, R_I32(glClientWaitSync((GLsync)(uintptr_t)A_U32(0), A_U32(1), (GLuint64)A_I64(2))))
 
 // ─── Buffer mapping ───────────────────────────────────────────────────────
@@ -1383,6 +1400,37 @@ extern "C" void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint
     _cart_blit_h = h;
     _cart_blitted_to_redirect = 1;
     glViewport(0, 0, _redirect_w, _redirect_h);
+}
+
+// Delete every GL object the current cart created and has not deleted (the
+// GL context must be current). For a host that drops a cart and keeps the
+// context: a libretro core restarting the cart (retro_reset). The host's own
+// objects (the redirect target, the cart's default VAO, the upload program)
+// are not the cart's and stay.
+extern "C" void wc_gl_release_cart_objects(void) {
+    size_t total = 0;
+    for (int t = 0; t < _OBJ_N; t++) {
+        for (uint32_t id : _cart_objs[t]) {
+            GLuint o = id;
+            switch (t) {
+            case _OBJ_BUF: glDeleteBuffers(1, &o); break;
+            case _OBJ_TEX: glDeleteTextures(1, &o); break;
+            case _OBJ_FBO: glDeleteFramebuffers(1, &o); break;
+            case _OBJ_RBO: glDeleteRenderbuffers(1, &o); break;
+            case _OBJ_VAO: glDeleteVertexArrays(1, &o); break;
+            case _OBJ_PROG: glDeleteProgram(o); break;
+            case _OBJ_SHADER: glDeleteShader(o); break;
+            case _OBJ_SAMPLER: glDeleteSamplers(1, &o); break;
+            case _OBJ_QUERY: glDeleteQueries(1, &o); break;
+            case _OBJ_SYNC: glDeleteSync((GLsync)(uintptr_t)id); break;
+            }
+        }
+        total += _cart_objs[t].size();
+        _cart_objs[t].clear();
+    }
+    _cart_bound_vao = 0;
+    _cart_uses_fbos = 0;
+    wc_log("wasmcart: released %zu GL objects the cart left\n", total);
 }
 
 extern "C" void wc_gl_imports_init(wc_host_t* host) {
