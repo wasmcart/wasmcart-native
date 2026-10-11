@@ -41,6 +41,10 @@ extern "C" long _wc_log_bytes = 0;
 #ifdef _WIN32
 #include <windows.h>
 #endif
+#ifndef _WIN32
+#include <dlfcn.h>
+#include <limits.h>
+#endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>  // _NSGetExecutablePath
 #endif
@@ -1473,9 +1477,40 @@ static bool is_wgpu_import_name(const char* n) {
     return upper_after("wgpu") || upper_after("emwgpu") || strncmp(n, "emscripten_webgpu_", 18) == 0;
 }
 
+#ifdef WASMCART_WGPU_BESIDE_MODULE
+// The file this code was loaded from: the library a host built as one (the
+// libretro core) lives in, symlinks resolved. A frontend loads the core from
+// its cores directory, which may be a link to where the files really are
+// (Batocera links /usr/lib/libretro/<core> to /userdata).
+static std::string module_path() {
+#if defined(_WIN32)
+    HMODULE mod = NULL;
+    char path[4096] = {0};
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)(void*)&module_path, &mod) || !GetModuleFileNameA(mod, path, sizeof(path)))
+        return "";
+    return path;
+#else
+    Dl_info di;
+    if (!dladdr((void*)&module_path, &di) || !di.dli_fname) return "";
+    char real[PATH_MAX];
+    return realpath(di.dli_fname, real) ? std::string(real) : std::string(di.dli_fname);
+#endif
+}
+#endif
+
+// Where the WebGPU support files are: $WASMCART_WGPU_DIR, else `wgpu/` beside
+// the executable, or for a host built as a library (WASMCART_WGPU_BESIDE_MODULE
+// names the directory) that directory beside the library.
 static std::string wgpu_dir() {
     const char* env = getenv("WASMCART_WGPU_DIR");
     if (env && *env) return env;
+#ifdef WASMCART_WGPU_BESIDE_MODULE
+    std::string s = module_path();
+    if (s.empty()) return "";
+    size_t slash = s.find_last_of("/\\");
+    return (slash == std::string::npos ? std::string(".") : s.substr(0, slash)) + "/" WASMCART_WGPU_BESIDE_MODULE;
+#else
     char exe[4096] = {0};
 #if defined(__linux__)
     ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
@@ -1490,6 +1525,7 @@ static std::string wgpu_dir() {
     std::string s(exe);
     size_t slash = s.find_last_of("/\\");
     return (slash == std::string::npos ? std::string(".") : s.substr(0, slash)) + "/wgpu";
+#endif
 }
 
 static v8::Local<v8::Value> run_js_fn(const char* src, int argc, v8::Local<v8::Value>* argv) {
@@ -1508,6 +1544,17 @@ static v8::Local<v8::Object> wgpu_bridge() {
     if (!g_wgpu_probed) {
         g_wgpu_probed = true;
         std::string dir = wgpu_dir();
+#if defined(WASMCART_WGPU_BESIDE_MODULE) && !defined(_WIN32)
+        // dawn.node resolves Node-API and libuv from the process. They are in
+        // this library (libnode is linked statically), but a frontend loads a
+        // core with RTLD_LOCAL, which hides them from libraries loaded after
+        // it: make this library's symbols global first.
+        {
+            std::string self = module_path();
+            if (!self.empty() && !dlopen(self.c_str(), RTLD_NOW | RTLD_NOLOAD | RTLD_GLOBAL))
+                wc_log("wasmcart: could not make %s's symbols global: %s\n", self.c_str(), dlerror());
+        }
+#endif
         v8::Local<v8::Value> argv[] = { v8str(dir.c_str()) };
         auto r = run_js_fn(
             "(function (dir) {"

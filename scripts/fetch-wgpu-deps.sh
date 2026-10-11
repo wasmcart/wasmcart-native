@@ -23,11 +23,12 @@ DEST=$2
 # version is bumped. They live here, not fetched from the release, so a
 # release asset replaced after the fact cannot change what gets built.
 case "$NATIVE_DAWN_VERSION-$TARGET" in
-  0.1.2-linux-x64)    SHA=101b160cbc4f2912d94d8d9da1ea1ff85146b203a71970fd8de42d3dd5ce1d7f ;;
-  0.1.2-linux-arm64)  SHA=49511d97293efbfe5e38f63f9ae23e768896fd53ae81fe57b744b3dff8e5472b ;;
-  0.1.2-darwin-x64)   SHA=c1178f6bb7c2d6ab09682202a2432f26604ec68b79ff0facf4179f5b8de3eab7 ;;
-  0.1.2-darwin-arm64) SHA=8181ad3ed1819ca4c02440cf5a3419a92d0e18d59334fce6bfba622120422058 ;;
-  0.1.2-win32-x64)    SHA=1b9d13cf65a946895e5a758a545da408ae9b1c8caa2f1fba809bfb02c10ffe04 ;;
+  0.1.3-linux-x64)     SHA=5ab1861ffeb7515096dd659a6184cdd8a8e8ed1a8133286705603c7d00f5b398 ;;
+  0.1.3-linux-arm64)   SHA=922c5184a071a1bbd398c6379fddc65244bdaff54df7873afafd530bc7a1cc91 ;;
+  0.1.3-darwin-x64)    SHA=46e008cc6204fff62e898d6079eecc2c91c49c1765e13f292d1b0a6f1a93a0f0 ;;
+  0.1.3-darwin-arm64)  SHA=c4bfc05a653cb94e36d45907acd6ae61623407e30fed1c20e2f4fb22f43b4ae3 ;;
+  0.1.3-win32-x64)     SHA=0ce5c1f12c84af16e16cc66c900936dee5741354993b6b20ce94751031c9fe4a ;;
+  0.1.3-android-arm64) SHA=d82f74d4d8e4b6e984ee66f27df9eec30012414e483e91aad92508b08266cec6 ;;
   *) echo "fetch-wgpu-deps: no pinned sha256 for native-dawn $NATIVE_DAWN_VERSION $TARGET" >&2; exit 1 ;;
 esac
 case "$TARGET" in
