@@ -50,7 +50,8 @@ module.exports = function createBridge(dir) {
         if (!adapter) throw new Error('no WebGPU adapter is available (check the GPU driver)');
         const a = host.describeAdapter(adapter, adapterOptions);
         process.stderr.write(`wasmcart-run: WebGPU on ${a.device || a.description} (${a.vendor}, ${a.featureLevel}${a.powerPreference ? ', ' + a.powerPreference : ''})\n`);
-        const rec = { session: null, surface: null, size: [0, 0], lost: null };
+        const rec = { session: null, surface: null, size: [0, 0], lost: null,
+          adapter: `${a.device || a.description} (${a.vendor}, ${a.featureLevel})` };
         rec.session = await host.createWgpuSession({
           moduleImports: WebAssembly.Module.imports(module), gpu, adapter, width, height,
           globals: dawn.globals,
@@ -61,6 +62,11 @@ module.exports = function createBridge(dir) {
         const { session } = rec;
         return session.env;
       });
+    },
+
+    // The adapter the cart runs on, for the host's log.
+    adapterName(id) {
+      return sessions.get(id)?.adapter || '';
     },
 
     attach(id, instance, memory) {

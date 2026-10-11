@@ -1707,7 +1707,8 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
             }
             wc_log("wasmcart: no WebGPU (%s); the cart also imports GL, so it runs on GL\n", why.c_str());
         } else {
-            wc_log("wasmcart: WebGPU cart\n");
+            v8::String::Utf8Value adapter(g_isolate, wgpu_call(host, "adapterName"));
+            wc_log("wasmcart: WebGPU cart, on %s\n", *adapter ? *adapter : "?");
         }
     }
 
