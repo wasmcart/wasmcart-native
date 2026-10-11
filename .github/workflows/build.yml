@@ -11,15 +11,18 @@ env:
   LIBNODE_VERSION: v26.3.0-jsg9
   # WebGPU (every job): native-dawn's release archive for the
   # platform (sha256 pinned in scripts/fetch-wgpu-deps.sh) and wasmcart's
-  # src/wgpu from its npm package, exactly this version. RELEASE ORDER: the
-  # wasmcart release (v$WASMCART_VERSION pushed and published to npm) comes
-  # first; only then push/tag this repo, or the WebGPU jobs fail at "Fetch
-  # WebGPU support" because `npm pack wasmcart@$WASMCART_VERSION` finds nothing.
-  # native-dawn 0.1.2 is the first whose Windows dawn.node loads outside
-  # node.exe; its release, and its hashes pinned in the fetch script, also
-  # come first (the script refuses the placeholders).
-  NATIVE_DAWN_VERSION: 0.1.3
-  WASMCART_VERSION: 0.32.0
+  # src/wgpu from its package, exactly this version: the npm pack tarball
+  # attached to wasmcart's GitHub release (WASMCART_SPEC; the same bytes npm
+  # publishes, so a release here does not wait for the npm publish). RELEASE
+  # ORDER: the wasmcart release (v$WASMCART_VERSION tagged, its GitHub release
+  # with wasmcart-$WASMCART_VERSION.tgz) comes first; only then push/tag this
+  # repo, or the WebGPU jobs fail at "Fetch WebGPU support". native-dawn 0.1.4
+  # is the first with objectHandle (src/wgpu_imports.cpp) and the
+  # shared-texture features (src/wgpu_gl_share.cpp); its release, and its
+  # hashes pinned in the fetch script, also come first.
+  NATIVE_DAWN_VERSION: 0.1.4
+  WASMCART_VERSION: 0.34.0
+  WASMCART_SPEC: https://github.com/wasmcart/wasmcart/releases/download/v0.34.0/wasmcart-0.34.0.tgz
 
 jobs:
   build-linux-x86_64:
@@ -33,7 +36,7 @@ jobs:
             libasound2-dev libpulse-dev libsamplerate0-dev \
             libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev \
             libwayland-dev libxkbcommon-dev libdecor-0-dev libdrm-dev libgbm-dev \
-            mesa-vulkan-drivers
+            mesa-vulkan-drivers libvulkan-dev
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
@@ -86,6 +89,10 @@ jobs:
       # Vulkan driver, which Dawn uses as its adapter.
       - name: WebGPU tests
         run: sh test/wgpu_test.sh build/wasmcart-run
+      - name: Code cache and pacing tests
+        run: |
+          sh test/code_cache_test.sh build/wasmcart-run
+          sh test/pacing_test.sh build/wasmcart-run
       - name: Package
         run: |
           strip build/wasmcart-run || true   # already stripped in Smoke test
@@ -106,7 +113,7 @@ jobs:
             libasound2-dev libpulse-dev libsamplerate0-dev \
             libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev \
             libwayland-dev libxkbcommon-dev libdecor-0-dev libdrm-dev libgbm-dev \
-            mesa-vulkan-drivers
+            mesa-vulkan-drivers libvulkan-dev
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
@@ -158,6 +165,10 @@ jobs:
       # Vulkan driver, which Dawn uses as its adapter.
       - name: WebGPU tests
         run: sh test/wgpu_test.sh build/wasmcart-run
+      - name: Code cache and pacing tests
+        run: |
+          sh test/code_cache_test.sh build/wasmcart-run
+          sh test/pacing_test.sh build/wasmcart-run
       - name: Package
         run: |
           strip build/wasmcart-run || true   # already stripped in Smoke test
