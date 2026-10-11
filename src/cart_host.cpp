@@ -343,6 +343,10 @@ static void write_host_info(wc_host_t* host, const wc_host_options_t* opts) {
     wc_write_u32(mem, ptr + WC_HOST_INFO_AUDIO_SAMPLE_RATE, opts ? opts->audio_sample_rate : 48000);
     // WC_HOST_FLAG_GPU_WGPU (0x02): this host selected WebGPU for the cart.
     wc_write_u32(mem, ptr + WC_HOST_INFO_FLAGS, host->uses_wgpu ? 0x02u : 0u);
+    // The machine's hardware threads, for a cart that sizes a thread pool (0: unknown).
+    // Only a cart declaring the 24-byte struct gets it.
+    if (host->info.flags & WC_FLAG_HOST_THREADS)
+        wc_write_u32(mem, ptr + WC_HOST_INFO_HARDWARE_THREADS, std::thread::hardware_concurrency());
 }
 
 // ─── Build WASM import object ──────────────────────────────────────────

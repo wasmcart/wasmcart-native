@@ -47,7 +47,10 @@
 #define WC_HOST_INFO_HOST_FPS          8
 #define WC_HOST_INFO_AUDIO_SAMPLE_RATE 12
 #define WC_HOST_INFO_FLAGS             16
-#define WC_HOST_INFO_SIZE              20
+// written only for a cart that sets WC_FLAG_HOST_THREADS: an older cart's
+// struct ends at 20 bytes, and the word after it is the cart's own
+#define WC_HOST_INFO_HARDWARE_THREADS  20
+#define WC_HOST_INFO_SIZE              20  // 24 with WC_FLAG_HOST_THREADS
 
 // ─── wc_time_t layout (20 bytes) ───────────────────────────────────────────
 // f64 time_ms   (offset 0)

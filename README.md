@@ -323,6 +323,8 @@ sh test/actions_test.sh build/wasmcart-run   # input actions: declarations, keyb
 ./actions_api_test test/actioncart.wasc   # wc_host_actions lists, wc_host_action_bind remaps
 ./peer_test 8796 <granted.wasc> <ungranted.wasc>   # wc_peer_* end to end
 ./seed_test ../wasmcart/test/fixtures/detrng.wasc  # entropy differs, pinned reproduces
+./host_threads_test ../wasmcart/test/fixtures/hostthreads.wasc ../wasmcart/test/fixtures/hostthreads_legacy.wasc
+                              # hardware_threads written only for a cart with WC_FLAG_HOST_THREADS
 sh test/wgpu_test.sh          # WebGPU carts (needs a build with WebGPU support)
 sh test/alloc_test.sh         # GL strings/mappings in the cart's wc_alloc blocks
 ./alloc_payload_test test/alloc   # text and peer payloads through wc_alloc

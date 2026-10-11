@@ -65,6 +65,9 @@ extern "C" {
 #define WC_FLAG_POINTER   (1 << 3)
 #define WC_FLAG_KEYBOARD  (1 << 4)
 #define WC_FLAG_DEBUG     (1 << 5)  // cart exports wc_debug_state() (SPEC "Debug state")
+// The cart's wc_host_info_t has hardware_threads (SPEC "wc_host_info_t"): the
+// host writes the machine's hardware thread count at offset 20
+#define WC_FLAG_HOST_THREADS (1 << 7)
 
 // ─── Structs ───────────────────────────────────────────────────────────────
 
