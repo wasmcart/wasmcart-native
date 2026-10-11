@@ -183,13 +183,16 @@ module.exports = function createBridge(dir) {
       const s = sessions.get(id);
       if (!s?.surface) return false;
       const canvas = s.session.canvas;
-      if (canvas.isDirect) {  // this frame was drawn into the window's texture
-        s.surface.present();
-        return true;
-      }
       const cfg = s.session.context.getConfiguration?.();
       const fills = x === 0 && y === 0 && w === winW && h === winH && canvas.width === winW && canvas.height === winH;
       const directKey = fills && cfg ? `${winW}x${winH} ${cfg.format} ${cfg.usage} ${(cfg.viewFormats || []).join()}` : '';
+      if (canvas.isDirect) {  // this frame was drawn into the window's texture
+        s.surface.present();
+        // the window or the canvas changed: the cart draws into its own
+        // texture again from the next frame, and the surface is configured anew
+        if (s.direct !== directKey) { canvas.setDirect(null); s.direct = ''; s.size = [0, 0]; }
+        return true;
+      }
       // drawing straight into the window, and the cart drew nothing this frame: the window keeps its last one
       if (s.direct && s.direct === directKey && canvas.hasDirect) return false;
       if (s.direct !== directKey || s.size[0] !== winW || s.size[1] !== winH) {
@@ -208,6 +211,7 @@ module.exports = function createBridge(dir) {
         };
         if (directKey && !s.directRefused?.has(directKey) && !configure(cfg.format, cfg.usage, cfg.viewFormats || [])) {
           s.direct = directKey;
+          process.stderr.write(`wasmcart-run: WebGPU frames drawn straight into the ${winW}x${winH} window (no copy)\n`);
         } else {
           if (directKey) (s.directRefused ??= new Set()).add(directKey);
           const err = configure(s.gpu.getPreferredCanvasFormat(), 0x10, []);

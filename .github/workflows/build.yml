@@ -36,7 +36,7 @@ jobs:
             libasound2-dev libpulse-dev libsamplerate0-dev \
             libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev \
             libwayland-dev libxkbcommon-dev libdecor-0-dev libdrm-dev libgbm-dev \
-            mesa-vulkan-drivers libvulkan-dev
+            mesa-vulkan-drivers libvulkan-dev xvfb
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
@@ -94,6 +94,8 @@ jobs:
           sh test/code_cache_test.sh build/wasmcart-run
           sh test/pacing_test.sh build/wasmcart-run
           sh test/thread_death_test.sh build/wasmcart-run
+      - name: WebGPU window test
+        run: xvfb-run -a -s "-screen 0 640x480x24" sh test/wgpu_window_test.sh build/wasmcart-run
       - name: Package
         run: |
           strip build/wasmcart-run || true   # already stripped in Smoke test
@@ -114,7 +116,7 @@ jobs:
             libasound2-dev libpulse-dev libsamplerate0-dev \
             libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev \
             libwayland-dev libxkbcommon-dev libdecor-0-dev libdrm-dev libgbm-dev \
-            mesa-vulkan-drivers libvulkan-dev
+            mesa-vulkan-drivers libvulkan-dev xvfb
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
@@ -171,6 +173,8 @@ jobs:
           sh test/code_cache_test.sh build/wasmcart-run
           sh test/pacing_test.sh build/wasmcart-run
           sh test/thread_death_test.sh build/wasmcart-run
+      - name: WebGPU window test
+        run: xvfb-run -a -s "-screen 0 640x480x24" sh test/wgpu_window_test.sh build/wasmcart-run
       - name: Package
         run: |
           strip build/wasmcart-run || true   # already stripped in Smoke test

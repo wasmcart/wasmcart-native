@@ -365,6 +365,7 @@ WASMCART_WGPU_DIR=$PWD/build/wgpu ./wgpu_alloc_test test/wgpu/wgpucart.wasc
 sh test/code_cache_test.sh    # compiled code kept between runs, a garbled file ignored
 sh test/pacing_test.sh        # 60 Hz without vsync
 sh test/thread_death_test.sh  # a cart thread that dies stops the cart
+xvfb-run -a sh test/wgpu_window_test.sh   # a WebGPU cart drawn straight into a window its size
 ```
 
 `text_test` takes the cart's debug-field offsets as arguments because they move
