@@ -272,7 +272,9 @@ clocks, `poll_oneoff` sleeps, `sched_yield`, ...), `wc_log` and asset loading
 work everywhere; GL, WebGPU and the other `wc_*` imports are main-thread only and throw if
 a thread calls them. A cart that imports `thread-spawn` without exporting
 `wasi_thread_start` (or the reverse) is refused. Threads are terminated when the
-host is destroyed.
+host is destroyed. A thread that dies (it traps, or its worker fails) stops the
+cart at its next frame with an error naming the thread: the cart's pool would
+otherwise run a worker short, and could wait on it forever.
 
 ## Resolution
 
@@ -362,6 +364,7 @@ WASMCART_WGPU_DIR=$PWD/build/wgpu ./wgpu_alloc_test test/wgpu/wgpucart.wasc
                               # (link it with -Wl,--dynamic-list=build/node-api-exports.list)
 sh test/code_cache_test.sh    # compiled code kept between runs, a garbled file ignored
 sh test/pacing_test.sh        # 60 Hz without vsync
+sh test/thread_death_test.sh  # a cart thread that dies stops the cart
 ```
 
 `text_test` takes the cart's debug-field offsets as arguments because they move

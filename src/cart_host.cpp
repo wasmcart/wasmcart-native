@@ -2839,6 +2839,21 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     deliver_text(host);         // before render, like every other input
     deliver_wheel(host);        // frame total in, zeroed again after render
     if (host->trapped) return;  // a payload the cart could not take (wc_cart_alloc)
+    // A cart thread that died (trapped, or its worker failed): the cart's
+    // pool is a worker short and may wait on it forever. Stop the cart, loudly.
+    if (!state->threads.IsEmpty()) {
+        auto threads = state->threads.Get(g_isolate);
+        v8::Local<v8::Value> fn, r;
+        if (threads->Get(ctx(), v8str("dead")).ToLocal(&fn) && fn->IsFunction() &&
+            fn.As<v8::Function>()->Call(ctx(), threads, 0, nullptr).ToLocal(&r)) {
+            int32_t dead = r->Int32Value(ctx()).FromMaybe(0);
+            if (dead) {
+                wc_log("wasmcart: cart thread %d died; the cart's thread pool is a worker short, so the cart is stopped\n", dead);
+                host->trapped = true;
+                return;
+            }
+        }
+    }
     // The host's WebGPU device lost: the cart cannot continue on it, so it is
     // not run again; the player reads wc_host_gpu_lost and tells the user.
     if (host->uses_wgpu && !host->gpu_lost) {

@@ -35,7 +35,7 @@ const fs = require('fs');
 const zlib = require('zlib');
 const crypto = require('crypto');
 
-const { module: wasmModule, memory, tid, startArg, tidCounter, workerSrc, cfg } = workerData;
+const { module: wasmModule, memory, tid, startArg, tidCounter, deadThread, workerSrc, cfg } = workerData;
 
 function log(text) {
   try { fs.writeSync(2, `wasmcart [cart t${tid}]: ${text}\n`); } catch {}
@@ -241,7 +241,12 @@ try {
   instance.exports.wasi_thread_start(tid, startArg);
 } catch (err) {
   if (err instanceof ProcExit) log(`thread called ${err.message}; thread ended`);
-  else log(`thread trapped: ${err && err.stack ? err.stack : err}`);
+  else {
+    log(`thread trapped: ${err && err.stack ? err.stack : err}`);
+    // the cart's pool is a worker short now: the main thread stops the cart
+    // at its next frame (the first death is the one reported)
+    Atomics.compareExchange(deadThread, 0, 0, tid);
+  }
 }
 if (zipFd !== null) { try { fs.closeSync(zipFd); } catch {} }
 )WCJS";
@@ -254,20 +259,28 @@ static const char WC_THREADS_SPAWNER_JS[] = R"WCJS(
   const fs = __wc_require('fs');
   const tidCounter = new Int32Array(new SharedArrayBuffer(4));
   tidCounter[0] = 1;                   // tids start at 1; 0 is never a spawned thread
+  // the first cart thread that died (trapped, or its worker failed or exited
+  // abnormally), or 0; nested threads report into the same word
+  const deadThread = new Int32Array(new SharedArrayBuffer(4));
   const workers = new Set();
+  let stopping = false;
   function spawn(startArg) {
     const tid = Atomics.add(tidCounter, 0, 1);
     if (tid <= 0 || tid > 0x1fffffff) return -1;
     try {
       const w = new Worker(workerSrc, {
         eval: true,
-        workerData: { module, memory, tid, startArg, tidCounter, workerSrc, cfg },
+        workerData: { module, memory, tid, startArg, tidCounter, deadThread, workerSrc, cfg },
       });
       workers.add(w);
       w.on('error', (err) => {
         try { fs.writeSync(2, `wasmcart: cart thread ${tid} failed: ${err && err.message}\n`); } catch {}
+        Atomics.compareExchange(deadThread, 0, 0, tid);
       });
-      w.on('exit', () => workers.delete(w));
+      w.on('exit', (code) => {
+        workers.delete(w);
+        if (code !== 0 && !stopping) Atomics.compareExchange(deadThread, 0, 0, tid);
+      });
       return tid;
     } catch (err) {
       try { fs.writeSync(2, `wasmcart: thread-spawn failed: ${err && err.message}\n`); } catch {}
@@ -275,9 +288,10 @@ static const char WC_THREADS_SPAWNER_JS[] = R"WCJS(
     }
   }
   function shutdown() {
+    stopping = true;
     for (const w of workers) { try { w.terminate(); } catch {} }
   }
-  return { spawn, shutdown, count: () => workers.size };
+  return { spawn, shutdown, count: () => workers.size, dead: () => Atomics.load(deadThread, 0) };
 })
 )WCJS";
 

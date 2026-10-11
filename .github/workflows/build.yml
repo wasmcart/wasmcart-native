@@ -89,10 +89,11 @@ jobs:
       # Vulkan driver, which Dawn uses as its adapter.
       - name: WebGPU tests
         run: sh test/wgpu_test.sh build/wasmcart-run
-      - name: Code cache and pacing tests
+      - name: Code cache, pacing and thread death tests
         run: |
           sh test/code_cache_test.sh build/wasmcart-run
           sh test/pacing_test.sh build/wasmcart-run
+          sh test/thread_death_test.sh build/wasmcart-run
       - name: Package
         run: |
           strip build/wasmcart-run || true   # already stripped in Smoke test
@@ -165,10 +166,11 @@ jobs:
       # Vulkan driver, which Dawn uses as its adapter.
       - name: WebGPU tests
         run: sh test/wgpu_test.sh build/wasmcart-run
-      - name: Code cache and pacing tests
+      - name: Code cache, pacing and thread death tests
         run: |
           sh test/code_cache_test.sh build/wasmcart-run
           sh test/pacing_test.sh build/wasmcart-run
+          sh test/thread_death_test.sh build/wasmcart-run
       - name: Package
         run: |
           strip build/wasmcart-run || true   # already stripped in Smoke test
