@@ -183,9 +183,11 @@ module.exports = function createBridge(dir) {
       const encoder = dev.createCommandEncoder();
       encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: h }, [w, h, 1]);
       dev.queue.submit([encoder.finish()]);
-      const f = { buffer, dev, size, width: w, height: h, bytesPerRow, bgra: format.startsWith('bgra'), ready: false, failed: false, dropped: false };
+      const f = { buffer, dev, size, width: w, height: h, bytesPerRow, bgra: format.startsWith('bgra'), ready: false, failed: false, dropped: false,
+        queuedAt: performance.now(), latency: 0 };
       buffer.mapAsync(0x0001 /* READ */).then(() => {
         f.ready = true;
+        f.latency = performance.now() - f.queuedAt;
         if (f.dropped) recycle(ring, f);
       }, () => { f.failed = true; });
       ring.queued.push(f);
@@ -194,7 +196,8 @@ module.exports = function createBridge(dir) {
 
     // The oldest queued frame once mapped, leaving `keep` newer ones queued:
     // { data: ArrayBuffer (bytesPerRow per row), width, height, bytesPerRow,
-    // bgra }, or null while its map has not landed (ask again after pumping
+    // bgra, latency: ms from readQueue until its map landed (as seen by the
+    // event loop: the GPU finishing the frame and the copy) }, or null while its map has not landed (ask again after pumping
     // Node). "none" when there is no such frame, so the host does not wait
     // for nothing.
     readTake(id, keep = 0) {
@@ -208,7 +211,7 @@ module.exports = function createBridge(dir) {
       ring.queued.shift();
       if (ring.taken) recycle(ring, ring.taken);
       ring.taken = f;
-      return { data: f.buffer.getMappedRange(), width: f.width, height: f.height, bytesPerRow: f.bytesPerRow, bgra: f.bgra };
+      return { data: f.buffer.getMappedRange(), width: f.width, height: f.height, bytesPerRow: f.bytesPerRow, bgra: f.bgra, latency: f.latency };
     },
 
     // The host is done with the frame readTake gave it.

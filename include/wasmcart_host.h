@@ -485,6 +485,10 @@ typedef struct {
     const uint8_t* data;
     uint32_t width, height, bytes_per_row;
     int bgra;
+    // ms from wc_host_wgpu_frame_queue until the copy was mapped, as seen by
+    // the host's event loop: the GPU finishing the frame and the copy (no
+    // earlier than the take that saw it, if the host was not pumping).
+    double latency_ms;
 } wc_wgpu_frame_t;
 int  wc_host_wgpu_frame_queue(wc_host_t* host);
 int  wc_host_wgpu_frame_take(wc_host_t* host, wc_wgpu_frame_t* out, int keep, int wait_ms);

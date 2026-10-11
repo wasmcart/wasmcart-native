@@ -3040,6 +3040,7 @@ extern "C" int wc_host_wgpu_frame_take(wc_host_t* host, wc_wgpu_frame_t* out, in
             out->height = u32("height");
             out->bytes_per_row = u32("bytesPerRow");
             out->bgra = o->Get(ctx(), v8str("bgra")).ToLocalChecked()->IsTrue();
+            out->latency_ms = o->Get(ctx(), v8str("latency")).ToLocalChecked()->NumberValue(ctx()).FromMaybe(0);
             return out->data ? 0 : 1;
         }
         if (!v->IsNull() || uv_hrtime() >= deadline) return 1;  // nothing queued, or not in time
