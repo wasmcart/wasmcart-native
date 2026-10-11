@@ -2006,11 +2006,41 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     // 6-10. Init sequence (_initialize, wc_get_info, wc_init)
     // Can be deferred for GL carts that need the GL context first (libretro)
     if (opts && opts->defer_init) {
+        // Only wc_init waits for the GL context. _initialize and wc_get_info
+        // run now, so the save region (save_ptr/save_size) is known at load:
+        // a libretro frontend reads SAVE_RAM's size and copies the .srm in
+        // right after retro_load_game, before the context exists, and the
+        // cart must find those bytes when wc_init runs (SPEC: the host loads
+        // the save before wc_init).
         host->init_deferred = true;
+        if (!fn_initialize.IsEmpty()) {
+            wc_log( "wasmcart: calling _initialize\n");
+            auto result = fn_initialize->Call(ctx(), ctx()->Global(), 0, nullptr);
+            if (result.IsEmpty() && try_catch.HasCaught()) {
+                v8::String::Utf8Value err(g_isolate, try_catch.Exception());
+                wc_log( "wasmcart: _initialize error: %s\n", *err);
+                return -1;
+            }
+            refresh_memory(host);
+        }
+        {
+            auto result = fn_get_info->Call(ctx(), ctx()->Global(), 0, nullptr);
+            if (!result.IsEmpty()) {
+                refresh_memory(host);
+                parse_cart_info(host, result.ToLocalChecked()->Uint32Value(ctx()).FromJust());
+            }
+        }
+        if (opts->save_data && host->info.save_ptr && opts->save_data_size > 0) {
+            uint32_t copy_size = opts->save_data_size < host->info.save_size ?
+                opts->save_data_size : host->info.save_size;
+            memcpy(host->memory + host->info.save_ptr, opts->save_data, copy_size);
+        }
+        // The cart's size is settled by wc_init, after write_host_info; until
+        // then the host plans with the preferred size.
         host->info.width = (opts->preferred_width > 0) ? opts->preferred_width : 640;
         host->info.height = (opts->preferred_height > 0) ? opts->preferred_height : 480;
         // Store opts for write_host_info during finish_init
-        if (opts) host->deferred_opts = *opts;
+        host->deferred_opts = *opts;
     } else {
         // Normal path: run full init now
         if (!fn_initialize.IsEmpty()) {
@@ -2100,19 +2130,8 @@ extern "C" int wc_host_finish_init(wc_host_t* host) {
     auto state = (v8_host_state*)host->v8_state;
     v8::TryCatch try_catch(g_isolate);
 
-    // Call _initialize
-    if (!state->fn_initialize.IsEmpty()) {
-        wc_log( "wasmcart: calling _initialize (deferred)\n");
-        auto result = state->fn_initialize.Get(g_isolate)->Call(ctx(), ctx()->Global(), 0, nullptr);
-        if (result.IsEmpty() && try_catch.HasCaught()) {
-            v8::String::Utf8Value err(g_isolate, try_catch.Exception());
-            wc_log( "wasmcart: _initialize error: %s\n", *err);
-            return -1;
-        }
-        refresh_memory(host);
-    }
-
-    // Call wc_get_info
+    // _initialize ran at load (wc_host_load_file), so the save region was
+    // known and filled before this. Call wc_get_info again
     {
         auto result = state->fn_wc_get_info.Get(g_isolate)->Call(ctx(), ctx()->Global(), 0, nullptr);
         if (!result.IsEmpty()) {
