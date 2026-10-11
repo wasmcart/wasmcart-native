@@ -2083,10 +2083,28 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
                 opts->save_data_size : host->info.save_size;
             memcpy(host->memory + host->info.save_ptr, opts->save_data, copy_size);
         }
-        // The cart's size is settled by wc_init, after write_host_info; until
-        // then the host plans with the preferred size.
-        host->info.width = (opts->preferred_width > 0) ? opts->preferred_width : 640;
-        host->info.height = (opts->preferred_height > 0) ? opts->preferred_height : 480;
+        // The host's preferences go in now, not only before wc_init: a cart
+        // that sizes itself from them can declare that size at load, and a
+        // libretro core sizes the frontend's video from what it knows at load
+        // (a cart that comes back from wc_init larger than that makes the
+        // frontend reinitialize its video). wc_get_info again for that size.
+        write_host_info(host, opts);
+        {
+            auto result = fn_get_info->Call(ctx(), ctx()->Global(), 0, nullptr);
+            if (!result.IsEmpty()) {
+                refresh_memory(host);
+                parse_cart_info(host, result.ToLocalChecked()->Uint32Value(ctx()).FromJust());
+            }
+        }
+        // The cart's size is settled by wc_init (write_host_info runs again
+        // first); until then the host plans with the larger of the cart's
+        // declared size and the preferred size.
+        if (opts->preferred_width > host->info.width) host->info.width = opts->preferred_width;
+        if (opts->preferred_height > host->info.height) host->info.height = opts->preferred_height;
+        if (!host->info.width || !host->info.height) {
+            host->info.width = 640;
+            host->info.height = 480;
+        }
         // Store opts for write_host_info during finish_init
         host->deferred_opts = *opts;
     } else {
