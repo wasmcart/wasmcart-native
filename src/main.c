@@ -557,6 +557,7 @@ int main(int argc, char* argv[]) {
     uint8_t* sav_data = sav_path[0] ? load_sav(sav_path, &sav_size) : NULL;
 
     wc_host_options_t opts = {
+        .wgpu_validate = fixed_step > 0.0,  // a test run keeps Dawn's validation
         .preferred_width = pref_width,
         .preferred_height = pref_height,
         .host_fps = 60,
@@ -663,6 +664,11 @@ int main(int argc, char* argv[]) {
 
     SDL_Renderer* renderer = NULL;
     SDL_Texture* fb_tex = NULL;
+    /* Frames are paced by the display when presents wait for vsync (a FIFO
+     * WebGPU surface, a GL swap interval of 1, a vsynced SDL renderer): the
+     * loop runs at the display's rate (60, 120, 144 Hz). Otherwise (no
+     * window surface, a driver that refused the interval) it sleeps to 60 Hz. */
+    bool vsync_paced = false;
 
     // WebGPU carts: no EGL; a WebGPU surface on the window's native handles.
     // A window without native handles (SDL's offscreen driver) still runs the
@@ -702,6 +708,7 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, attached == 0 ? "wasmcart: rendering %ux%u via WebGPU\n"
                                       : "wasmcart: rendering %ux%u via WebGPU, no window surface (nothing presented)\n",
                 cart_w, cart_h);
+        vsync_paced = attached == 0 && !uncapped;  // FIFO: present waits for the display
     }
     // 2D carts: destroy EGL (conflicts with SDL renderer), use SDL accelerated renderer
     // GL carts: keep EGL for direct GL rendering
@@ -711,6 +718,11 @@ int main(int argc, char* argv[]) {
         if (!uncapped) render_flags |= SDL_RENDERER_PRESENTVSYNC;
         renderer = SDL_CreateRenderer(window, -1, render_flags);
         if (renderer) {
+            // (SDL's offscreen and dummy drivers report vsync and wait for nothing)
+            SDL_RendererInfo ri;
+            const char* drv = SDL_GetCurrentVideoDriver();
+            bool headless = drv && (!strcmp(drv, "offscreen") || !strcmp(drv, "dummy"));
+            vsync_paced = !uncapped && !headless && SDL_GetRendererInfo(renderer, &ri) == 0 && (ri.flags & SDL_RENDERER_PRESENTVSYNC);
             fb_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
                 SDL_TEXTUREACCESS_STREAMING, cart_w, cart_h);
             SDL_RenderSetLogicalSize(renderer, cart_w, cart_h);
@@ -750,8 +762,9 @@ int main(int argc, char* argv[]) {
              * random phases of the refresh — microstutter at a nominally
              * perfect frame rate. egl_set_swap_interval also handles the
              * macOS Metal path, where eglSwapInterval alone is a no-op. */
-            egl_set_swap_interval(uncapped ? 0 : 1);
-            fprintf(stderr, "wasmcart: swap interval %d\n", uncapped ? 0 : 1);
+            bool interval_ok = egl_set_swap_interval(uncapped ? 0 : 1);
+            vsync_paced = !uncapped && interval_ok && egl_has_window_surface();
+            fprintf(stderr, "wasmcart: swap interval %d%s\n", uncapped ? 0 : 1, uncapped || interval_ok ? "" : " (refused: frames paced by a 60 Hz timer)");
             // Set up FBO redirect for GL carts
             {
                 extern void wc_gl_setup_redirect(uint32_t width, uint32_t height);
@@ -1169,11 +1182,18 @@ int main(int argc, char* argv[]) {
             fps_last = now;
         }
 
-        // Frame timing — vsync handles it if available, otherwise manual delay
-        if (!uncapped) {
-            uint64_t frame_end = SDL_GetTicks64();
-            uint64_t elapsed = frame_end - now;
-            if (elapsed < 16) SDL_Delay(16 - (uint32_t)elapsed);
+        // Frame timing: a vsynced present already waited for the display
+        // (sleeping 16 ms - elapsed on top capped a 120/144 Hz display at
+        // 62.5 fps with judder). Without vsync, a 60 Hz deadline that does
+        // not drift: each frame's target is the last one's + 1/60 s.
+        if (!uncapped && !vsync_paced) {
+            static uint64_t next = 0;  // performance-counter ticks
+            const uint64_t freq = SDL_GetPerformanceFrequency();
+            const uint64_t period = freq / 60;
+            uint64_t t = SDL_GetPerformanceCounter();
+            if (!next || t > next + period) next = t;  // first frame, or fell behind: no catch-up burst
+            next += period;
+            if (next > t) SDL_Delay((uint32_t)((next - t) * 1000 / freq));
         }
     }
 

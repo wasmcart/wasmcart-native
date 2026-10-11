@@ -89,6 +89,19 @@ static v8::Local<v8::String> v8str(const char* s) {
     return v8::String::NewFromUtf8(g_isolate, s).ToLocalChecked();
 }
 
+// The compiled-code cache (code_cache.cpp).
+v8::MaybeLocal<v8::WasmModuleObject> wc_compile_cached(wc_host_t* host, v8::Local<v8::Context> context, const uint8_t* bytes,
+                                                       size_t len, const char* cache_dir, void (*pump)(wc_host_t*),
+                                                       std::string* error);
+extern "C" void wc_code_cache_flush(void);
+static void pump_node(wc_host_t* host);
+
+// The hot WebGPU imports as direct calls into Dawn (wgpu_imports.cpp).
+extern "C" bool wc_wgpu_native_init(const char* dir);
+v8::Local<v8::Value> wc_wgpu_native_table(wc_host_t* host);
+int wc_wgpu_native_install(wc_host_t* host, v8::Local<v8::Object> env, v8::Local<v8::Object> wgpu_mod);
+void wc_wgpu_native_drop(wc_host_t* host);
+
 v8::Local<v8::Context> ctx() {
     return g_setup->context();
 }
@@ -135,6 +148,11 @@ static int v8_init() {
     v8::V8::SetFlagsFromString("--turbo-inline-js-wasm-calls");
     v8::V8::SetFlagsFromString("--turbo-optimize-inlined-js-wasm-wrappers");
     v8::V8::SetFlagsFromString("--turboshaft-wasm-in-js-inlining");
+    // The compiled-code cache (code_cache.cpp) is written each time V8 has
+    // optimized another 256 KB of the cart's code. V8's default waits for 2 s
+    // without new optimized code, which a running game never gives it (not
+    // once in 45 s of pugball).
+    v8::V8::SetFlagsFromString("--wasm-caching-timeout-ms=0 --wasm-caching-threshold=262144");
     if (const char* extra = getenv("WASMCART_V8_FLAGS")) v8::V8::SetFlagsFromString(extra); // profiling (--prof ...)
 
     std::vector<std::string> args = {"wasmcart-run"};
@@ -202,6 +220,7 @@ extern "C" wc_host_t* wc_host_create(void) {
 
 extern "C" void wc_host_destroy(wc_host_t* host) {
     if (!host) return;
+    wc_code_cache_flush();  // a compiled-code cache write in progress finishes first
     if (host->v8_state) threads_shutdown(host);
     bool had_wgpu = host->uses_wgpu;
     if (had_wgpu) {
@@ -211,6 +230,7 @@ extern "C" void wc_host_destroy(wc_host_t* host) {
         v8::HandleScope hs(g_isolate);
         v8::Context::Scope cs(ctx());
         std::string why;
+        wc_wgpu_native_drop(host);
         wgpu_wait(host, wgpu_call(host, "destroy", 0, nullptr), &why, 3000);
         host->uses_wgpu = false;
     }
@@ -1453,6 +1473,7 @@ static void pump_node(wc_host_t* host);
 
 static v8::Global<v8::Object> g_wgpu_bridge;
 
+
 // Free Node's environment at exit while dawn.node is still intact.
 //
 // g_setup is a static of this program, so its destructor (which runs
@@ -1577,6 +1598,7 @@ static v8::Local<v8::Object> wgpu_bridge() {
         if (r->IsObject()) {
             g_wgpu_bridge.Reset(g_isolate, r.As<v8::Object>());
             atexit(free_node_before_dawn);  // dawn.node is loaded now
+            wc_wgpu_native_init(dir.c_str()); // and with it Dawn's C API
         }
         else if (r->IsString()) { v8::String::Utf8Value s(g_isolate, r); g_wgpu_unavailable = *s; }
         else g_wgpu_unavailable = "loading WebGPU support failed";
@@ -1644,6 +1666,14 @@ static v8::Local<v8::Value> gpu_trap(const char* name, const char* selected) {
 
 // ─── Load cart ─────────────────────────────────────────────────────────
 
+// While a compile finishes: V8 delivers its result as a foreground task,
+// which the platform runs when drained (the event loop alone left a second
+// load of the same cart waiting forever).
+static void pump_compile(wc_host_t* host) {
+    pump_node(host);
+    g_platform->DrainTasks(g_isolate);
+}
+
 extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const wc_host_options_t* opts) {
     v8::Locker locker(g_isolate);
     v8::Isolate::Scope isolate_scope(g_isolate);
@@ -1663,14 +1693,13 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
     // 2. Compile WASM module — V8 Liftoff baseline is near-instant
     v8::TryCatch try_catch(g_isolate);
 
-    // Compile WASM module — V8 Liftoff baseline compiles instantly
-    v8::MemorySpan<const uint8_t> wire_bytes(host->wasm_bytes, host->wasm_bytes_len);
-    auto maybe_module = v8::WasmModuleObject::Compile(g_isolate, wire_bytes);
+    // Compile the WASM module, from the compiled-code cache when it has this
+    // cart (code_cache.cpp): the optimized code a previous run produced.
+    std::string compile_error;
+    auto maybe_module = wc_compile_cached(host, ctx(), host->wasm_bytes, host->wasm_bytes_len,
+                                          opts ? opts->code_cache_dir : NULL, pump_compile, &compile_error);
     if (maybe_module.IsEmpty()) {
-        if (try_catch.HasCaught()) {
-            v8::String::Utf8Value err(g_isolate, try_catch.Exception());
-            wc_log( "wasmcart: compile error: %s\n", *err);
-        }
+        wc_log("wasmcart: compile error: %s\n", compile_error.c_str());
         return -1;
     }
     auto wasm_module = maybe_module.ToLocalChecked();
@@ -1716,8 +1745,13 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
         } else {
             uint32_t w = (opts && opts->preferred_width) ? opts->preferred_width : (host->manifest.width ? host->manifest.width : 640);
             uint32_t h = (opts && opts->preferred_height) ? opts->preferred_height : (host->manifest.height ? host->manifest.height : 480);
-            v8::Local<v8::Value> a[] = { wasm_module, v8::Integer::NewFromUnsigned(g_isolate, w), v8::Integer::NewFromUnsigned(g_isolate, h) };
-            auto env = wgpu_wait(host, wgpu_call(host, "prepare", 3, a), &why);
+            char pin[16] = "";
+            if (opts && opts->wgpu_adapter_vendor && opts->wgpu_adapter_device)
+                snprintf(pin, sizeof pin, "%04x:%04x", opts->wgpu_adapter_vendor, opts->wgpu_adapter_device);
+            v8::Local<v8::Value> a[] = { wasm_module, v8::Integer::NewFromUnsigned(g_isolate, w), v8::Integer::NewFromUnsigned(g_isolate, h),
+                                         wc_wgpu_native_table(host), v8::Boolean::New(g_isolate, opts && opts->wgpu_validate),
+                                         v8str(pin), v8::Boolean::New(g_isolate, opts && opts->wgpu_gl_share) };
+            auto env = wgpu_wait(host, wgpu_call(host, "prepare", 7, a), &why);
             if (!env.IsEmpty() && env->IsObject()) { wgpu_env = env.As<v8::Object>(); host->uses_wgpu = true; }
         }
         if (!host->uses_wgpu) {
@@ -1771,6 +1805,8 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
             env_imports->Set(ctx(), k, wgpu_env->Get(ctx(), k).ToLocalChecked()).Check();
         }
         imports->Set(ctx(), v8str("wgpu"), wgpu_env).Check();
+        int n = wc_wgpu_native_install(host, env_imports, wgpu_env);
+        if (n) wc_log("wasmcart: %d WebGPU imports call Dawn directly\n", n);
     }
     if (host->cart_imports_wgpu || host->cart_imports_gl) {
         auto wgpu_mod = v8::Object::New(g_isolate);
@@ -2839,6 +2875,7 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     }
 
     refresh_memory(host);
+    if (host->uses_wgpu) wgpu_call(host, "end");
 
     // A WebGPU cart changes size by reconfiguring its surface and writing the
     // new size into wc_info_t (SPEC.md, "Resolution changes", GPU carts): adopt
@@ -2997,6 +3034,38 @@ extern "C" int wc_host_wgpu_present(wc_host_t* host, int x, int y, int w, int h,
                                  v8::Integer::New(g_isolate, h), v8::Integer::New(g_isolate, win_w), v8::Integer::New(g_isolate, win_h) };
     auto r = wgpu_call(host, "present", 6, a);
     return r->IsTrue() ? 0 : -1;
+}
+
+// For wgpu_gl_share.cpp: the cart's adapter and device as native handles, and
+// whether the device has Dawn's texture-sharing features.
+bool wc_wgpu_share_handles(wc_host_t* host, void** adapter, void** device, bool* can_share) {
+    if (!host->uses_wgpu) return false;
+    v8::HandleScope hs(g_isolate);
+    auto r = wgpu_call(host, "shareHandles");
+    if (!r->IsObject()) return false;
+    auto o = r.As<v8::Object>();
+    auto a = o->Get(ctx(), v8str("adapter")).ToLocalChecked(), d = o->Get(ctx(), v8str("device")).ToLocalChecked();
+    if (!a->IsBigInt() || !d->IsBigInt()) return false;
+    *adapter = (void*)(uintptr_t)a.As<v8::BigInt>()->Uint64Value();
+    *device = (void*)(uintptr_t)d.As<v8::BigInt>()->Uint64Value();
+    *can_share = o->Get(ctx(), v8str("canShare")).ToLocalChecked()->IsTrue();
+    return true;
+}
+// The cart's current frame texture (native handle), its size and format name.
+bool wc_wgpu_frame_texture(wc_host_t* host, void** texture, uint32_t* w, uint32_t* h, std::string* format) {
+    if (!host->uses_wgpu) return false;
+    v8::HandleScope hs(g_isolate);
+    auto r = wgpu_call(host, "frameTexture");
+    if (!r->IsObject()) return false;
+    auto o = r.As<v8::Object>();
+    auto t = o->Get(ctx(), v8str("texture")).ToLocalChecked();
+    if (!t->IsBigInt()) return false;
+    *texture = (void*)(uintptr_t)t.As<v8::BigInt>()->Uint64Value();
+    *w = o->Get(ctx(), v8str("width")).ToLocalChecked()->Uint32Value(ctx()).FromMaybe(0);
+    *h = o->Get(ctx(), v8str("height")).ToLocalChecked()->Uint32Value(ctx()).FromMaybe(0);
+    v8::String::Utf8Value f(g_isolate, o->Get(ctx(), v8str("format")).ToLocalChecked());
+    *format = *f ? *f : "";
+    return true;
 }
 
 // The cart's last frame as top-down RGBA into out (w*h*4 bytes, w and h the

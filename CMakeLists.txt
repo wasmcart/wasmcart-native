@@ -26,7 +26,11 @@ endif()
 set(LIBWASMCART_SOURCES
     src/cart_host.cpp
     src/gl_imports.cpp
+    src/wgpu_imports.cpp
+    src/code_cache.cpp
+    src/wgpu_gl_share.cpp
     src/gl_procs.c
+    src/gl_track.c
     src/asset_loader.c
     deps/miniz.c
     deps/cJSON.c
@@ -185,6 +189,10 @@ endif()
 set(WASMCART_WGPU_JS_DIR "" CACHE PATH "wasmcart's src/wgpu directory (host.js and the generated glue)")
 set(NATIVE_DAWN_DIR "" CACHE PATH "native-dawn install prefix for this platform")
 if(WASMCART_WGPU_JS_DIR AND NATIVE_DAWN_DIR)
+    # the hot imports call Dawn's C API (src/wgpu_imports.cpp): its headers
+    # here, its library resolved at run time from wgpu/
+    target_include_directories(wasmcart PRIVATE "${NATIVE_DAWN_DIR}/include")
+    target_compile_definitions(wasmcart PRIVATE WASMCART_WGPU_NATIVE)
     set(WGPU_OUT "$<TARGET_FILE_DIR:wasmcart-run>/wgpu")
     file(WRITE "${CMAKE_BINARY_DIR}/wgpu-package.json" "{ \"type\": \"module\" }\n")
     # wasmcart's JS keeps its own layout (src/wgpu/ beside src/cartMemory.js,

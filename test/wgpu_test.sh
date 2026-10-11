@@ -79,6 +79,12 @@ check "webgpu cart: compute result reached the cart"   "$(pixel wgpucart 2 2 2>/
 check "webgpu cart: clean exit"                        "$(cat "$OUT/wgpucart.status")" "0"
 
 has   "webgpu cart: the adapter it got is logged"         wgpucart "wasmcart-run: WebGPU on "
+# the hot imports (pass state and draws, queue writes) call Dawn's C API
+# directly (src/wgpu_imports.cpp); every object they named had its handle
+has   "webgpu cart: the hot imports call Dawn directly"   wgpucart "WebGPU imports call Dawn directly"
+check "webgpu cart: no native call fell back to the glue" "$(grep -c 'named an object with no native handle' "$OUT/wgpucart.log")" "0"
+# a test run (--fixed-step) keeps Dawn's validation; a player's run skips it
+has   "webgpu cart: a test run keeps Dawn's validation"   wgpucart "Dawn validation on"
 
 # Built before wasmcart 0.32: malloc/free, no wc_alloc. wasmcart 0.32 never
 # uses a cart's malloc, so its first mapped range (asked for inside a mapAsync
@@ -94,6 +100,11 @@ check "malloc-only WebGPU cart: exits without crashing"     "$(cat "$OUT/old031.
 
 run wgpucart 3 lowpower WASMCART_WGPU_POWER=low-power
 has   "WASMCART_WGPU_POWER reaches the adapter request"     lowpower "compatibility, low-power)"
+
+run wgpucart 8 novalidation WASMCART_WGPU_VALIDATION=0
+has   "WASMCART_WGPU_VALIDATION=0 skips Dawn's validation"  novalidation "Dawn validation off"
+check "without validation: triangle"                    "$(pixel novalidation 128 110 2>/dev/null)" "255,128,64"
+check "without validation: compute result"              "$(pixel novalidation 2 2 2>/dev/null)" "42,0,255"
 
 # A shot after the cart resized its surface: the host adopts the size the cart
 # wrote into wc_info_t, so the frame is read (it used to never be written and

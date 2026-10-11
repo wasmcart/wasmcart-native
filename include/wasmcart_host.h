@@ -218,6 +218,24 @@ typedef struct {
     // does): a dual GL + WebGPU cart runs on GL, a WebGPU-only cart is
     // refused. A user's "use GL" setting.
     bool     wgpu_disabled;
+    // Keep Dawn's command validation for a WebGPU cart (tests, debugging).
+    // Off, a player's run skips it (Dawn's "skip_validation"): it costs CPU on
+    // every call. WASMCART_WGPU_VALIDATION=1 / 0 overrides either way.
+    bool     wgpu_validate;
+    // Run a WebGPU cart on this GPU (PCI vendor and device ids, both nonzero):
+    // an embedder that shows the frames with GL pins Dawn to its GL context's
+    // GPU (wc_gl_context_gpu). Zero: the power preference picks the adapter.
+    uint32_t wgpu_adapter_vendor, wgpu_adapter_device;
+    // Make the cart's WebGPU device able to share its frames with GL
+    // (wc_host_wgpu_gl_share): Dawn's shared-texture features, requested
+    // where the adapter has them.
+    bool     wgpu_gl_share;
+    // Where the cart's compiled code is kept between runs (V8's serialized
+    // module, optimized functions included; one file per cart, by the SHA-256
+    // of its wasm): NULL = the platform's cache directory
+    // ($XDG_CACHE_HOME/wasmcart/code, ~/Library/Caches/wasmcart/code,
+    // %LOCALAPPDATA%\wasmcart\cache\code), "" = none.
+    const char* code_cache_dir;
 } wc_host_options_t;
 
 // ─── Host API ──────────────────────────────────────────────────────────────
@@ -493,6 +511,35 @@ typedef struct {
     // earlier than the take that saw it, if the host was not pumping).
     double latency_ms;
 } wc_wgpu_frame_t;
+/* Sharing a WebGPU cart's frames with GL (an embedder that shows them in its
+ * own GL context: the libretro core), instead of reading them back through
+ * the CPU. Linux: the frame is copied on the GPU into memory GL and Dawn
+ * share (Vulkan opaque fds, GL_EXT_memory_object_fd / GL_EXT_semaphore_fd),
+ * the same frame, with no CPU wait. Load the cart with wgpu_gl_share, and with
+ * wgpu_adapter_vendor/device set to the GL context's GPU (wc_gl_context_gpu).
+ * All of these run with the GL context current.
+ *   wc_gl_context_gpu       the GL context's GPU (PCI ids): 0, or -1 with why
+ *   wc_host_wgpu_gl_share   set up for the loaded cart: 0, or -1 with why
+ *                           (then the frames go through wc_host_wgpu_frame_*)
+ *   wc_host_wgpu_gl_frame   after wc_host_run_frame: the frame in a GL texture,
+ *                           GL already waiting for the GPU copy. 0; 1 when the
+ *                           cart has drawn no frame yet; -1 with why (sharing
+ *                           is then off)
+ *   wc_host_wgpu_gl_frame_done   after GL has drawn from the texture
+ *   wc_host_wgpu_gl_unshare      before the GL context goes away */
+typedef struct {
+    uint32_t texture;  // GL texture name (GL_TEXTURE_2D, rows top-down)
+    uint32_t width, height;
+    int      bgra;     // the memory is B, G, R, A
+} wc_wgpu_gl_frame_t;
+int  wc_gl_context_gpu(wc_host_t* host, uint32_t* vendor, uint32_t* device, char* why, size_t why_len);
+int  wc_host_wgpu_gl_share(wc_host_t* host, char* why, size_t why_len);
+int  wc_host_wgpu_gl_frame(wc_host_t* host, wc_wgpu_gl_frame_t* out, char* why, size_t why_len);
+void wc_host_wgpu_gl_frame_done(wc_host_t* host);
+void wc_host_wgpu_gl_unshare(wc_host_t* host);
+// The PCI ids of the GPU the cart's WebGPU device is on: 0, or -1.
+int  wc_host_wgpu_adapter_ids(wc_host_t* host, uint32_t* vendor, uint32_t* device);
+
 int  wc_host_wgpu_frame_queue(wc_host_t* host);
 int  wc_host_wgpu_frame_take(wc_host_t* host, wc_wgpu_frame_t* out, int keep, int wait_ms);
 void wc_host_wgpu_frame_release(wc_host_t* host);

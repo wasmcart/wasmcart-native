@@ -241,9 +241,9 @@ void egl_swap_buffers(void) {
     }
 }
 
-void egl_set_swap_interval(int interval) {
-    if (!initialized) return;
-    eglSwapInterval(egl_display, interval);
+bool egl_set_swap_interval(int interval) {
+    if (!initialized) return false;
+    bool ok = eglSwapInterval(egl_display, interval) == EGL_TRUE;
 #ifdef __APPLE__
     /* ANGLE Metal ignores eglSwapInterval; displaySyncEnabled is the real
      * switch. Apply now if ANGLE already made its layer, else let
@@ -252,7 +252,9 @@ void egl_set_swap_interval(int interval) {
         mac_desired_sync = interval;
         mac_sync_applied = wc_mac_set_display_sync(mac_layer, interval >= 1);
     }
+    ok = true;
 #endif
+    return ok;
 }
 
 void egl_destroy(void) {

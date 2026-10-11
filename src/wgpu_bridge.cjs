@@ -17,7 +17,9 @@ module.exports = function createBridge(dir) {
   const dawn = require(path.join(dir, 'dawn.node'));
   // wasmcart's src/ tree as CMake copies it (host.js imports ../cartMemory.js)
   const host = require(path.join(dir, 'src', 'wgpu', 'host.js'));
-  let gpu = null;
+  // Dawn instances by their flags (validation, a pinned adapter); dropped
+  // with the last session
+  const instances = new Map();
   const sessions = new Map();
 
   const job = fn => {
@@ -47,25 +49,57 @@ module.exports = function createBridge(dir) {
 
     // Ask for an adapter and build the cart's session. value: the glue's env
     // functions. A failure's message is the reason the host gives the cart.
-    prepare(id, module, width, height) {
+    // native: { register(ptr, handle), forget(ptr) } from cart_host.cpp, which
+    // serves the cart's hot WebGPU imports itself (wgpu_imports.cpp): told the
+    // native handle of every object those calls name, keyed by the cart's
+    // pointer for it. Absent, every call goes through the glue.
+    // validate: keep Dawn's command validation (a test run); a player's run
+    // skips it ("skip_validation"), WASMCART_WGPU_VALIDATION=1 / 0 overriding.
+    // pin: "vvvv:dddd", the PCI ids of the one GPU to use (the GPU of the
+    // embedder's GL context), or empty. share: the device may share textures
+    // with GL (Dawn's SharedTextureMemoryOpaqueFD and SharedFenceVkSemaphore
+    // OpaqueFD, where the adapter has them: wc_host_wgpu_gl_share).
+    prepare(id, module, width, height, native, validate, pin, share) {
       return job(async () => {
         if (process.env.WASMCART_NO_WGPU === '1') throw new Error('WebGPU is disabled (WASMCART_NO_WGPU=1)');
-        gpu ??= dawn.create([]);
+        const env = process.env.WASMCART_WGPU_VALIDATION;
+        const on = env === '1' ? true : env === '0' ? false : !!validate;
+        const flags = [...(on ? [] : ['enable-dawn-features=skip_validation']), ...(pin ? [`adapter-id=${pin}`] : [])];
+        const key = flags.join(' ');
+        if (!instances.has(key)) instances.set(key, dawn.create(flags));
+        const gpu = instances.get(key);
         // WASMCART_WGPU_POWER=low-power|high-performance picks the GPU on a
         // two-GPU machine (wasmcart docs/webgpu.md); the choice is logged so a
-        // caller can assert it.
+        // caller can assert it. A pin names the GPU exactly instead.
         const adapterOptions = host.wgpuAdapterOptions();
-        const adapter = await gpu.requestAdapter(adapterOptions);
-        if (!adapter) throw new Error('no WebGPU adapter is available (check the GPU driver)');
+        const adapter = await gpu.requestAdapter(adapterOptions).catch(e => { if (pin) return null; throw e; });
+        if (!adapter) throw new Error(pin ? `no WebGPU adapter on the GPU ${pin} (the GL context's)` : 'no WebGPU adapter is available (check the GPU driver)');
         const a = host.describeAdapter(adapter, adapterOptions);
-        process.stderr.write(`wasmcart-run: WebGPU on ${a.device || a.description} (${a.vendor}, ${a.featureLevel}${a.powerPreference ? ', ' + a.powerPreference : ''})\n`);
-        const rec = { session: null, surface: null, size: [0, 0], lost: null,
+        process.stderr.write(`wasmcart-run: WebGPU on ${a.device || a.description} (${a.vendor}, ${a.featureLevel}${pin ? ', GPU ' + pin : a.powerPreference ? ', ' + a.powerPreference : ''}), Dawn validation ${on ? 'on' : 'off'}\n`);
+        const shared = share ? dawn.addDeviceFeatures(adapter, ['SharedTextureMemoryOpaqueFD', 'SharedFenceVkSemaphoreOpaqueFD']) : [];
+        const rec = { session: null, surface: null, size: [0, 0], lost: null, gpu, adapterObject: adapter,
+          canShare: shared.length === 2,
           adapter: `${a.device || a.description} (${a.vendor}, ${a.featureLevel})` };
+        let onObject = null, onRelease = null;
+        if (native) {
+          if (typeof dawn.objectHandle !== 'function') throw new Error(`${path.join(dir, 'dawn.node')} has no objectHandle (native-dawn 0.1.4 or newer is needed)`);
+          // the objects the native imports name (passes, pipelines, bind
+          // groups, buffers, queues, bundles); nothing else needs a handle
+          const named = new Set(['GPURenderPassEncoder', 'GPUComputePassEncoder', 'GPURenderPipeline', 'GPUComputePipeline',
+            'GPUBindGroup', 'GPUBuffer', 'GPUQueue', 'GPURenderBundle'].map(c => dawn.globals[c]));
+          onObject = (ptr, obj) => {
+            if (!named.has(obj?.constructor)) return;
+            const h = dawn.objectHandle(obj);
+            if (h !== undefined) native.register(ptr, h);
+          };
+          onRelease = ptr => native.forget(ptr);
+        }
         rec.session = await host.createWgpuSession({
           moduleImports: WebAssembly.Module.imports(module), gpu, adapter, width, height,
           globals: dawn.globals,
           log: msg => process.stderr.write(msg + '\n'),
           onLost: info => { rec.lost = info; },
+          onObject, onRelease,
         });
         sessions.set(id, rec);
         const { session } = rec;
@@ -76,6 +110,24 @@ module.exports = function createBridge(dir) {
     // The adapter the cart runs on, for the host's log.
     adapterName(id) {
       return sessions.get(id)?.adapter || '';
+    },
+
+    // Native handles for sharing the cart's frame with GL (wgpu_gl_share.cpp):
+    // the adapter and device, and whether the device has the sharing features.
+    shareHandles(id) {
+      const s = sessions.get(id);
+      if (!s?.session) return null;
+      return { adapter: dawn.objectHandle(s.adapterObject), device: dawn.objectHandle(s.session.device), canShare: s.canShare };
+    },
+
+    // The cart's current frame: its texture's native handle, size and format;
+    // null before the cart configured its canvas.
+    frameTexture(id) {
+      const session = sessions.get(id)?.session;
+      if (!session) return null;
+      let t;
+      try { t = session.context.getCurrentTexture(); } catch { return null; }
+      return { texture: dawn.objectHandle(t), width: t.width, height: t.height, format: t.format };
     },
 
     attach(id, instance, memory) {
@@ -91,6 +143,12 @@ module.exports = function createBridge(dir) {
 
     begin(id) {
       sessions.get(id)?.session.beginFrame();
+    },
+
+    // After wc_render: the frame's last submit is done (wasmcart destroys the
+    // textures and buffers the cart released then).
+    end(id) {
+      sessions.get(id)?.session.endFrame();
     },
 
     // An error kept from an async WebGPU callback (a cart-memory allocation
@@ -115,25 +173,53 @@ module.exports = function createBridge(dir) {
 
     // Draw the cart's frame into the window, letterboxed into (x, y, w, h)
     // of a winW x winH surface, and present it.
+    //
+    // When the cart's canvas is the window's size and fills it, the cart
+    // draws straight into the window's texture from the next frame on (the
+    // surface configured as the cart configured its canvas): no copy into the
+    // window, no extra pass. Any other size, or a surface that cannot take the
+    // cart's format and usage, letterboxes with a copy.
     present(id, x, y, w, h, winW, winH) {
       const s = sessions.get(id);
       if (!s?.surface) return false;
-      if (s.size[0] !== winW || s.size[1] !== winH) {
+      const canvas = s.session.canvas;
+      if (canvas.isDirect) {  // this frame was drawn into the window's texture
+        s.surface.present();
+        return true;
+      }
+      const cfg = s.session.context.getConfiguration?.();
+      const fills = x === 0 && y === 0 && w === winW && h === winH && canvas.width === winW && canvas.height === winH;
+      const directKey = fills && cfg ? `${winW}x${winH} ${cfg.format} ${cfg.usage} ${(cfg.viewFormats || []).join()}` : '';
+      // drawing straight into the window, and the cart drew nothing this frame: the window keeps its last one
+      if (s.direct && s.direct === directKey && canvas.hasDirect) return false;
+      if (s.direct !== directKey || s.size[0] !== winW || s.size[1] !== winH) {
+        s.direct = '';
+        canvas.setDirect?.(null);
         // The first present mode the surface supports (configure checks).
-        let err;
-        for (const presentMode of s.presentModes) {
-          try {
-            s.surface.configure({ width: winW, height: winH, format: gpu.getPreferredCanvasFormat(), usage: 0x10, presentMode });
-            err = null;
-            break;
-          } catch (e) { err = e; }
+        const configure = (format, usage, viewFormats) => {
+          let err;
+          for (const presentMode of s.presentModes) {
+            try {
+              s.surface.configure({ width: winW, height: winH, format, usage, viewFormats, presentMode });
+              return null;
+            } catch (e) { err = e; }
+          }
+          return err;
+        };
+        if (directKey && !s.directRefused?.has(directKey) && !configure(cfg.format, cfg.usage, cfg.viewFormats || [])) {
+          s.direct = directKey;
+        } else {
+          if (directKey) (s.directRefused ??= new Set()).add(directKey);
+          const err = configure(s.gpu.getPreferredCanvasFormat(), 0x10, []);
+          if (err) throw err;
         }
-        if (err) throw err;
         s.size = [winW, winH];
       }
       const texture = s.surface.getCurrentTexture();
       const drew = s.session.drawTo({ getCurrentTexture: () => texture }, { x, y, w, h });
       s.surface.present();
+      // the surface now matches the canvas: the cart's next frame goes straight into it
+      if (s.direct && canvas.setDirect) canvas.setDirect(() => s.surface.getCurrentTexture());
       return drew;
     },
 
@@ -247,7 +333,7 @@ module.exports = function createBridge(dir) {
         // every Dawn object now, while Dawn is alive, instead of leaving them
         // to node::FreeEnvironment, which a player runs from a static
         // destructor at exit, after Dawn's own state may already be gone.
-        if (sessions.size === 0) gpu = null;
+        if (sessions.size === 0) instances.clear();
       });
     },
   };

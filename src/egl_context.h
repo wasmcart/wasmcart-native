@@ -34,8 +34,9 @@ void egl_swap_buffers(void);
 
 // Swap interval: 1 = block presents on vsync, 0 = free-run. On macOS this
 // drives CAMetalLayer.displaySyncEnabled (ANGLE ignores eglSwapInterval),
-// applied lazily once ANGLE's first present has created its layer.
-void egl_set_swap_interval(int interval);
+// applied lazily once ANGLE's first present has created its layer. Returns
+// whether the driver took it (the player then paces frames by the swap).
+bool egl_set_swap_interval(int interval);
 
 // Destroy EGL context and surfaces.
 void egl_destroy(void);

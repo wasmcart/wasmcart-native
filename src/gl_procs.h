@@ -20,6 +20,44 @@ extern "C" {
 // stay NULL (the GL layer no-ops/tolerates them). Returns 1 if loader is ok.
 int wc_gl_procs_load(void* get_proc);
 
+// The GL state a libretro core saves and restores around each cart frame,
+// kept as it is set (gl_track.c): the calls that set it go through the
+// wc_trk_ functions below (the #defines at the end), which update a copy, so
+// reading it is no GL call (each glGet is a full glthread sync).
+// wc_gl_track_reset reads the real state once (a new context).
+typedef struct wc_gl_tracked_state {
+    GLint program, vao, fbo, active_tex, tex_2d, array_buf, elem_buf, viewport[4];
+    GLboolean blend, depth_test, scissor_test, stencil_test, cull_face, dither;
+    GLint blend_src_rgb, blend_dst_rgb, blend_src_a, blend_dst_a, blend_eq_rgb, blend_eq_a;
+    GLboolean depth_mask, color_mask[4];
+    GLint stencil_mask;
+    GLfloat clear_color[4];
+} wc_gl_tracked_state;
+void wc_gl_track_reset(void);
+void wc_gl_track_get(wc_gl_tracked_state* out);
+void wc_trk_glUseProgram(GLuint program);
+void wc_trk_glBindVertexArray(GLuint vao);
+void wc_trk_glBindFramebuffer(GLenum target, GLuint fb);
+void wc_trk_glActiveTexture(GLenum unit);
+void wc_trk_glBindTexture(GLenum target, GLuint tex);
+void wc_trk_glBindBuffer(GLenum target, GLuint buf);
+void wc_trk_glViewport(GLint x, GLint y, GLsizei w, GLsizei h);
+void wc_trk_glEnable(GLenum cap);
+void wc_trk_glDisable(GLenum cap);
+void wc_trk_glBlendFunc(GLenum s, GLenum d);
+void wc_trk_glBlendFuncSeparate(GLenum sr, GLenum dr, GLenum sa, GLenum da);
+void wc_trk_glBlendEquation(GLenum m);
+void wc_trk_glBlendEquationSeparate(GLenum rgb, GLenum a);
+void wc_trk_glDepthMask(GLboolean m);
+void wc_trk_glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a);
+void wc_trk_glStencilMask(GLuint m);
+void wc_trk_glStencilMaskSeparate(GLenum face, GLuint m);
+void wc_trk_glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a);
+void wc_trk_glDeleteBuffers(GLsizei n, const GLuint* ids);
+void wc_trk_glDeleteTextures(GLsizei n, const GLuint* ids);
+void wc_trk_glDeleteFramebuffers(GLsizei n, const GLuint* ids);
+void wc_trk_glDeleteVertexArrays(GLsizei n, const GLuint* ids);
+
 extern PFNGLACTIVETEXTUREPROC p_glActiveTexture;
 extern PFNGLATTACHSHADERPROC p_glAttachShader;
 extern PFNGLBEGINTRANSFORMFEEDBACKPROC p_glBeginTransformFeedback;
@@ -196,35 +234,35 @@ extern PFNGLVERTEXATTRIBPOINTERPROC p_glVertexAttribPointer;
 extern PFNGLVIEWPORTPROC p_glViewport;
 
 // Redirect direct glXxx() calls to the loaded pointers.
-#define glActiveTexture p_glActiveTexture
+#define glActiveTexture wc_trk_glActiveTexture
 #define glAttachShader p_glAttachShader
 #define glBeginTransformFeedback p_glBeginTransformFeedback
 #define glBindAttribLocation p_glBindAttribLocation
-#define glBindBuffer p_glBindBuffer
+#define glBindBuffer wc_trk_glBindBuffer
 #define glBindBufferBase p_glBindBufferBase
 #define glBindBufferRange p_glBindBufferRange
-#define glBindFramebuffer p_glBindFramebuffer
+#define glBindFramebuffer wc_trk_glBindFramebuffer
 #define glBindRenderbuffer p_glBindRenderbuffer
 #define glBindSampler p_glBindSampler
-#define glBindTexture p_glBindTexture
-#define glBindVertexArray p_glBindVertexArray
+#define glBindTexture wc_trk_glBindTexture
+#define glBindVertexArray wc_trk_glBindVertexArray
 #define glBlendBarrier p_glBlendBarrier
 #define glBlendColor p_glBlendColor
-#define glBlendEquation p_glBlendEquation
-#define glBlendEquationSeparate p_glBlendEquationSeparate
-#define glBlendFunc p_glBlendFunc
-#define glBlendFuncSeparate p_glBlendFuncSeparate
+#define glBlendEquation wc_trk_glBlendEquation
+#define glBlendEquationSeparate wc_trk_glBlendEquationSeparate
+#define glBlendFunc wc_trk_glBlendFunc
+#define glBlendFuncSeparate wc_trk_glBlendFuncSeparate
 #define glBlitFramebuffer p_glBlitFramebuffer
 #define glBufferData p_glBufferData
 #define glBufferSubData p_glBufferSubData
 #define glCheckFramebufferStatus p_glCheckFramebufferStatus
 #define glClear p_glClear
 #define glClearBufferfv p_glClearBufferfv
-#define glClearColor p_glClearColor
+#define glClearColor wc_trk_glClearColor
 #define glClearDepthf p_glClearDepthf
 #define glClearStencil p_glClearStencil
 #define glClientWaitSync p_glClientWaitSync
-#define glColorMask p_glColorMask
+#define glColorMask wc_trk_glColorMask
 #define glCompileShader p_glCompileShader
 #define glCompressedTexImage2D p_glCompressedTexImage2D
 #define glCompressedTexSubImage2D p_glCompressedTexSubImage2D
@@ -235,21 +273,21 @@ extern PFNGLVIEWPORTPROC p_glViewport;
 #define glCreateProgram p_glCreateProgram
 #define glCreateShader p_glCreateShader
 #define glCullFace p_glCullFace
-#define glDeleteBuffers p_glDeleteBuffers
-#define glDeleteFramebuffers p_glDeleteFramebuffers
+#define glDeleteBuffers wc_trk_glDeleteBuffers
+#define glDeleteFramebuffers wc_trk_glDeleteFramebuffers
 #define glDeleteProgram p_glDeleteProgram
 #define glDeleteQueries p_glDeleteQueries
 #define glDeleteRenderbuffers p_glDeleteRenderbuffers
 #define glDeleteSamplers p_glDeleteSamplers
 #define glDeleteShader p_glDeleteShader
 #define glDeleteSync p_glDeleteSync
-#define glDeleteTextures p_glDeleteTextures
-#define glDeleteVertexArrays p_glDeleteVertexArrays
+#define glDeleteTextures wc_trk_glDeleteTextures
+#define glDeleteVertexArrays wc_trk_glDeleteVertexArrays
 #define glDepthFunc p_glDepthFunc
-#define glDepthMask p_glDepthMask
+#define glDepthMask wc_trk_glDepthMask
 #define glDepthRangef p_glDepthRangef
 #define glDetachShader p_glDetachShader
-#define glDisable p_glDisable
+#define glDisable wc_trk_glDisable
 #define glDisableVertexAttribArray p_glDisableVertexAttribArray
 #define glDrawArrays p_glDrawArrays
 #define glDrawArraysIndirect p_glDrawArraysIndirect
@@ -258,7 +296,7 @@ extern PFNGLVIEWPORTPROC p_glViewport;
 #define glDrawElements p_glDrawElements
 #define glDrawElementsIndirect p_glDrawElementsIndirect
 #define glDrawElementsInstanced p_glDrawElementsInstanced
-#define glEnable p_glEnable
+#define glEnable wc_trk_glEnable
 #define glEnableVertexAttribArray p_glEnableVertexAttribArray
 #define glEndTransformFeedback p_glEndTransformFeedback
 #define glFenceSync p_glFenceSync
@@ -323,8 +361,8 @@ extern PFNGLVIEWPORTPROC p_glViewport;
 #define glShaderSource p_glShaderSource
 #define glStencilFunc p_glStencilFunc
 #define glStencilFuncSeparate p_glStencilFuncSeparate
-#define glStencilMask p_glStencilMask
-#define glStencilMaskSeparate p_glStencilMaskSeparate
+#define glStencilMask wc_trk_glStencilMask
+#define glStencilMaskSeparate wc_trk_glStencilMaskSeparate
 #define glStencilOp p_glStencilOp
 #define glStencilOpSeparate p_glStencilOpSeparate
 #define glTexBuffer p_glTexBuffer
@@ -362,14 +400,14 @@ extern PFNGLVIEWPORTPROC p_glViewport;
 #define glUniformMatrix3fv p_glUniformMatrix3fv
 #define glUniformMatrix4fv p_glUniformMatrix4fv
 #define glUnmapBuffer p_glUnmapBuffer
-#define glUseProgram p_glUseProgram
+#define glUseProgram wc_trk_glUseProgram
 #define glValidateProgram p_glValidateProgram
 #define glVertexAttrib4fv p_glVertexAttrib4fv
 #define glVertexAttribDivisor p_glVertexAttribDivisor
 #define glVertexAttribI4ui p_glVertexAttribI4ui
 #define glVertexAttribIPointer p_glVertexAttribIPointer
 #define glVertexAttribPointer p_glVertexAttribPointer
-#define glViewport p_glViewport
+#define glViewport wc_trk_glViewport
 
 #ifdef __cplusplus
 }

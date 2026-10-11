@@ -1401,6 +1401,7 @@ static void _init_fb_upload(void) {
 // a WebGPU bgra8unorm frame), else R, G, B, A. GL_BGRA_EXT is not core GLES3,
 // so both upload as GL_RGBA and the shader swizzles.
 static uint32_t _fb_upload_w = 0, _fb_upload_h = 0;
+static void _draw_frame_texture(uint32_t w, uint32_t h, int bgra);
 extern "C" void wc_gl_upload_frame(const uint8_t* pixels, uint32_t w, uint32_t h, uint32_t row_pixels, int bgra) {
     if (!_redirect_fbo || !pixels || w == 0 || h == 0) return;
     _init_fb_upload();
@@ -1417,7 +1418,12 @@ extern "C" void wc_gl_upload_frame(const uint8_t* pixels, uint32_t w, uint32_t h
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     }
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    _draw_frame_texture(w, h, bgra);
+}
 
+// Draw the frame texture bound to GL_TEXTURE_2D (top-down rows, RGBA or BGRA
+// in memory) into the redirect FBO at its size.
+static void _draw_frame_texture(uint32_t w, uint32_t h, int bgra) {
     // Draw to redirect FBO at the image's size
     glBindFramebuffer(GL_FRAMEBUFFER, _redirect_fbo);
     glViewport(0, 0, w, h);
@@ -1435,6 +1441,18 @@ extern "C" void wc_gl_upload_frame(const uint8_t* pixels, uint32_t w, uint32_t h
     _cart_blit_h = h;
     _cart_blitted_to_redirect = 1;
     glViewport(0, 0, _redirect_w, _redirect_h);
+}
+
+// A frame already in a GL texture (a WebGPU cart's, shared with GL:
+// wgpu_gl_share.cpp) drawn into the redirect FBO, as wc_gl_upload_frame draws
+// uploaded pixels.
+extern "C" void wc_gl_present_texture(uint32_t tex, uint32_t w, uint32_t h, int bgra) {
+    if (!_redirect_fbo || !tex || w == 0 || h == 0) return;
+    _init_fb_upload();
+    if (!_fb_upload_program) return;
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    _draw_frame_texture(w, h, bgra);
 }
 
 extern "C" void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint32_t h) {

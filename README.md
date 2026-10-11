@@ -17,7 +17,9 @@ Options:
   --scale N       Integer scale factor for 2D carts (default: 1)
   --fullscreen    Start in fullscreen mode
   --fps           Show FPS counter
-  --uncapped      Disable vsync and frame cap
+  --uncapped      Disable vsync and frame cap (with vsync the display paces
+                  the frames, at its own rate: 60, 120, 144 Hz; with no vsync
+                  to wait on, a 60 Hz timer does)
   --max-memory GB Stop the player (exit 3) once its resident memory passes GB
                   (default 10; 0 = no limit)
   --msaa N        Multisampled window surface (N samples) for GL carts, a browser's antialias: true
@@ -38,6 +40,14 @@ Environment:
   WASMCART_WGPU_POWER=low-power|high-performance
                          Which GPU WebGPU carts get on a two-GPU machine
                          (low-power = integrated); the choice is logged
+  WASMCART_WGPU_VALIDATION=1|0
+                         Keep or skip Dawn's command validation. Default:
+                         skipped (it costs CPU on every call), kept in a
+                         --fixed-step (test) run
+  XDG_CACHE_HOME         The compiled-code cache lives in
+                         $XDG_CACHE_HOME/wasmcart/code (~/.cache/wasmcart/code;
+                         ~/Library/Caches/wasmcart/code on macOS,
+                         %LOCALAPPDATA%\wasmcart\cache\code on Windows)
   SDL_VIDEODRIVER=offscreen (or dummy)
                          Headless: no window, and GL runs on an EGL surfaceless
                          context, so tests never touch the X or Wayland server.
@@ -60,6 +70,14 @@ Every `.wasc` cart that runs in the browser or Node.js also runs here. Same WASM
 
 V8's Liftoff baseline compiler starts WASM instantly — no compilation delay, even for 52MB Godot carts (356ms load time).
 
+A cart's compiled code is kept between runs (V8's serialized module, one file
+per cart named by the SHA-256 of its wasm, in the cache directory above,
+capped at 1 GB, oldest first): V8 writes it each time it has optimized another
+256 KB of the cart, and the next start runs that optimized code from its first
+frame instead of the baseline code it would otherwise run for the first
+seconds. A file another V8 cannot use is ignored and the cart compiles as
+usual.
+
 | Cart | FPS (uncapped, 1080p) |
 |------|---------------|
 | Snake (320x240 2D) | 4,900 |
@@ -76,6 +94,9 @@ V8's Liftoff baseline compiler starts WASM instantly — no compilation delay, e
 - C/C++ compiler (gcc/clang)
 - [SDL2](https://www.libsdl.org) dev headers (`sudo apt install libsdl2-dev`)
 - EGL + GLES dev headers (`sudo apt install libegl-dev libgles-dev`)
+- Linux builds with WebGPU: the Vulkan headers (`sudo apt install libvulkan-dev`), for
+  sharing WebGPU frames with GL in an embedder's context (the libretro core); Vulkan
+  itself is loaded at run time, never linked
 
 ### Build from source
 
@@ -101,8 +122,8 @@ JavaScript, inside this player's embedded Node, with Dawn from
 [native-dawn](https://github.com/monteslu/native-dawn). Point CMake at both:
 
 ```bash
-cmake .. -DWASMCART_WGPU_JS_DIR=<wasmcart 0.32.0 or later>/src/wgpu \
-         -DNATIVE_DAWN_DIR=<native-dawn>/dist/linux-x64
+cmake .. -DWASMCART_WGPU_JS_DIR=<wasmcart 0.34.0 or later>/src/wgpu \
+         -DNATIVE_DAWN_DIR=<native-dawn 0.1.4 or later>/dist/linux-x64
 ```
 
 `scripts/fetch-wgpu-deps.sh <target> <dir>` fetches both the way the release
@@ -120,6 +141,14 @@ runtime DLLs they need). Ship that directory with the binary.
 Without it the player has no WebGPU: a WebGPU-only cart is refused at load
 with that reason, and a cart that also imports GL runs on GL (which is how
 the libretro and Android builds behave today).
+
+The calls a frame makes most (a render or compute pass's state, draws and
+dispatches, and the queue's buffer writes) are C++ callbacks into Dawn's C
+API (`src/wgpu_imports.cpp`), as the GL imports are, on the objects the glue
+made (native-dawn's `objectHandle`); the rest go through the glue. Dawn's
+validation is off unless asked for (above). When the cart's canvas is the
+window's size, it draws straight into the window's texture; any other size is
+letterboxed with a copy.
 
 If the GPU device is lost while a WebGPU cart runs (a driver reset, the GPU
 removed), the cart cannot continue: the player stops running it, prints the
@@ -331,6 +360,8 @@ sh test/alloc_test.sh         # GL strings/mappings in the cart's wc_alloc block
 WASMCART_WGPU_DIR=$PWD/build/wgpu ./wgpu_alloc_test test/wgpu/wgpucart.wasc
                               # WebGPU adapter info + mapped ranges through wc_alloc
                               # (link it with -Wl,--dynamic-list=build/node-api-exports.list)
+sh test/code_cache_test.sh    # compiled code kept between runs, a garbled file ignored
+sh test/pacing_test.sh        # 60 Hz without vsync
 ```
 
 `text_test` takes the cart's debug-field offsets as arguments because they move
