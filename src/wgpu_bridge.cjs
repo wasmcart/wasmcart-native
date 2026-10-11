@@ -210,8 +210,11 @@ module.exports = function createBridge(dir) {
       if (!f.ready) return null;
       ring.queued.shift();
       if (ring.taken) recycle(ring, ring.taken);
+      let data;
+      // Throws once the device is gone (lost or destroyed after the map landed).
+      try { data = f.buffer.getMappedRange(); } catch { return 'none'; }
       ring.taken = f;
-      return { data: f.buffer.getMappedRange(), width: f.width, height: f.height, bytesPerRow: f.bytesPerRow, bgra: f.bgra, latency: f.latency };
+      return { data, width: f.width, height: f.height, bytesPerRow: f.bytesPerRow, bgra: f.bgra, latency: f.latency };
     },
 
     // The host is done with the frame readTake gave it.

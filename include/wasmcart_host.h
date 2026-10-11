@@ -468,8 +468,8 @@ int wc_host_wgpu_frame_size(wc_host_t* host, uint32_t* w, uint32_t* h);
 /* The adapter a WebGPU cart runs on (as logged), or "" for one that does not. */
 const char* wc_host_wgpu_adapter(wc_host_t* host);
 /* Why this host has no WebGPU for the cart loaded last, which imports it
- * (a dual cart that runs on GL), or "" when it has WebGPU or the cart does
- * not import it. */
+ * (a dual cart that runs on GL, or a WebGPU-only cart wc_host_load_file
+ * refused), or "" when it has WebGPU or the cart does not import it. */
 const char* wc_host_wgpu_unavailable_reason(wc_host_t* host);
 /* Pipelined readback, for a host that shows a WebGPU cart's frame through
  * another API (the libretro core's GL framebuffer) without waiting on the GPU

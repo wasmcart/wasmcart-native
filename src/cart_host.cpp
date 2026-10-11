@@ -1594,9 +1594,17 @@ static v8::Local<v8::Value> wgpu_call(wc_host_t* host, const char* method, int a
     std::vector<v8::Local<v8::Value>> argv;
     argv.push_back(host_key(host));
     for (int i = 0; i < argc; i++) argv.push_back(args[i]);
+    // An exception here must not reach Node's uncaught-exception handler,
+    // which exits the process (the frontend with it).
+    v8::TryCatch tc(g_isolate);
     v8::Local<v8::Value> out;
-    if (!fn.As<v8::Function>()->Call(ctx(), bridge, (int)argv.size(), argv.data()).ToLocal(&out))
+    if (!fn.As<v8::Function>()->Call(ctx(), bridge, (int)argv.size(), argv.data()).ToLocal(&out)) {
+        if (tc.HasCaught()) {
+            v8::String::Utf8Value e(g_isolate, tc.Exception());
+            wc_log("wasmcart: WebGPU %s failed: %s\n", method, *e ? *e : "?");
+        }
         return v8::Undefined(g_isolate);
+    }
     return out;
 }
 
@@ -1709,11 +1717,11 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
             if (!env.IsEmpty() && env->IsObject()) { wgpu_env = env.As<v8::Object>(); host->uses_wgpu = true; }
         }
         if (!host->uses_wgpu) {
+            g_wgpu_why = why;
             if (!host->cart_imports_gl) {
                 wc_log("wasmcart: this cart is a WebGPU cart, but this host cannot provide WebGPU: %s\n", why.c_str());
                 return -1;
             }
-            g_wgpu_why = why;
             wc_log("wasmcart: no WebGPU (%s); the cart also imports GL, so it runs on GL\n", why.c_str());
         } else {
             v8::String::Utf8Value adapter(g_isolate, wgpu_call(host, "adapterName"));
@@ -2967,10 +2975,8 @@ extern "C" int wc_host_wgpu_attach_window(wc_host_t* host, const char* kind, uin
     v8::Isolate::Scope isolate_scope(g_isolate);
     v8::HandleScope hs(g_isolate);
     v8::Context::Scope cs(ctx());
-    v8::TryCatch tc(g_isolate);
     v8::Local<v8::Value> a[] = { v8str(kind), v8::BigInt::NewFromUnsigned(g_isolate, display), v8::BigInt::NewFromUnsigned(g_isolate, handle), v8::Boolean::New(g_isolate, vsync != 0) };
     auto r = wgpu_call(host, "attachWindow", 4, a);
-    if (tc.HasCaught()) { v8::String::Utf8Value e(g_isolate, tc.Exception()); wc_log("wasmcart: WebGPU window: %s\n", *e); return -1; }
     return r->IsTrue() ? 0 : -1;
 }
 
@@ -2983,11 +2989,9 @@ extern "C" int wc_host_wgpu_present(wc_host_t* host, int x, int y, int w, int h,
     v8::Isolate::Scope isolate_scope(g_isolate);
     v8::HandleScope hs(g_isolate);
     v8::Context::Scope cs(ctx());
-    v8::TryCatch tc(g_isolate);
     v8::Local<v8::Value> a[] = { v8::Integer::New(g_isolate, x), v8::Integer::New(g_isolate, y), v8::Integer::New(g_isolate, w),
                                  v8::Integer::New(g_isolate, h), v8::Integer::New(g_isolate, win_w), v8::Integer::New(g_isolate, win_h) };
     auto r = wgpu_call(host, "present", 6, a);
-    if (tc.HasCaught()) { v8::String::Utf8Value e(g_isolate, tc.Exception()); wc_log("wasmcart: WebGPU present: %s\n", *e); return -1; }
     return r->IsTrue() ? 0 : -1;
 }
 
