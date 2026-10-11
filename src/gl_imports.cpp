@@ -1342,11 +1342,13 @@ static void _init_fb_upload(void) {
         "precision mediump float;\n"
         "in vec2 vUV;\n"
         "uniform sampler2D uTex;\n"
+        "uniform int uSwap;\n"
         "out vec4 fragColor;\n"
         "void main() {\n"
         // The cart's ARGB8888 is B, G, R, A in memory; uploaded as GL_RGBA
         // (GL_BGRA_EXT is not core GLES3) it samples as .bgra.
-        "  fragColor = texture(uTex, vUV).bgra;\n"
+        "  vec4 c = texture(uTex, vUV);\n"
+        "  fragColor = uSwap != 0 ? c.bgra : c;\n"
         "}\n";
 
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
@@ -1371,26 +1373,36 @@ static void _init_fb_upload(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 }
 
-extern "C" void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint32_t h) {
+// Draw an image into the redirect FBO at its own size: rows row_pixels
+// apart, B, G, R, A byte order when bgra (a 2D cart's ARGB8888 framebuffer,
+// a WebGPU bgra8unorm frame), else R, G, B, A. GL_BGRA_EXT is not core GLES3,
+// so both upload as GL_RGBA and the shader swizzles.
+static uint32_t _fb_upload_w = 0, _fb_upload_h = 0;
+extern "C" void wc_gl_upload_frame(const uint8_t* pixels, uint32_t w, uint32_t h, uint32_t row_pixels, int bgra) {
     if (!_redirect_fbo || !pixels || w == 0 || h == 0) return;
     _init_fb_upload();
     if (!_fb_upload_program) return;
 
-    // Upload pixels as texture (ARGB8888 = BGRA byte order on little-endian;
-    // the shader swizzles it back)
     glBindTexture(GL_TEXTURE_2D, _fb_upload_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
-        GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, row_pixels != w ? (GLint)row_pixels : 0);
+    if (w != _fb_upload_w || h != _fb_upload_h) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        _fb_upload_w = w;
+        _fb_upload_h = h;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 
-    // Draw to redirect FBO at cart's framebuffer size
+    // Draw to redirect FBO at the image's size
     glBindFramebuffer(GL_FRAMEBUFFER, _redirect_fbo);
     glViewport(0, 0, w, h);
-    glClearColor(0, 0, 0, 1);
-    glClear(GL_COLOR_BUFFER_BIT);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
     glUseProgram(_fb_upload_program);
+    glUniform1i(glGetUniformLocation(_fb_upload_program, "uSwap"), bgra ? 1 : 0);
     glBindVertexArray(_fb_upload_vao);
     glActiveTexture(GL_TEXTURE0);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -1400,6 +1412,11 @@ extern "C" void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint
     _cart_blit_h = h;
     _cart_blitted_to_redirect = 1;
     glViewport(0, 0, _redirect_w, _redirect_h);
+}
+
+extern "C" void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint32_t h) {
+    // ARGB8888 is B, G, R, A in memory on little-endian
+    wc_gl_upload_frame(pixels, w, h, w, 1);
 }
 
 // Delete every GL object the current cart created and has not deleted (the

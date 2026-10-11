@@ -3001,6 +3001,49 @@ extern "C" int wc_host_wgpu_read_frame(wc_host_t* host, uint8_t* out, uint32_t w
     data->CopyContents(out, (size_t)w * h * 4);
     return 0;
 }
+extern "C" int wc_host_wgpu_frame_queue(wc_host_t* host) {
+    if (!host->uses_wgpu || host->gpu_lost) return -1;
+    v8::Locker locker(g_isolate);
+    v8::Isolate::Scope isolate_scope(g_isolate);
+    v8::HandleScope hs(g_isolate);
+    v8::Context::Scope cs(ctx());
+    return wgpu_call(host, "readQueue")->IsTrue() ? 0 : -1;
+}
+extern "C" int wc_host_wgpu_frame_take(wc_host_t* host, wc_wgpu_frame_t* out, int keep, int wait_ms) {
+    if (!host->uses_wgpu || host->gpu_lost) return 1;
+    v8::Locker locker(g_isolate);
+    v8::Isolate::Scope isolate_scope(g_isolate);
+    v8::HandleScope hs(g_isolate);
+    v8::Context::Scope cs(ctx());
+    v8::Local<v8::Value> a[] = { v8::Integer::New(g_isolate, keep) };
+    uint64_t deadline = uv_hrtime() + (uint64_t)wait_ms * 1000000ull;
+    for (;;) {
+        pump_node(host);  // delivers the buffer maps that have landed
+        auto v = wgpu_call(host, "readTake", 1, a);
+        if (v->IsObject()) {
+            auto o = v.As<v8::Object>();
+            auto u32 = [&](const char* k) { return o->Get(ctx(), v8str(k)).ToLocalChecked()->Uint32Value(ctx()).FromJust(); };
+            auto ab = o->Get(ctx(), v8str("data")).ToLocalChecked();
+            if (!ab->IsArrayBuffer()) return 1;
+            out->data = (const uint8_t*)ab.As<v8::ArrayBuffer>()->GetBackingStore()->Data();
+            out->width = u32("width");
+            out->height = u32("height");
+            out->bytes_per_row = u32("bytesPerRow");
+            out->bgra = o->Get(ctx(), v8str("bgra")).ToLocalChecked()->IsTrue();
+            return out->data ? 0 : 1;
+        }
+        if (!v->IsNull() || uv_hrtime() >= deadline) return 1;  // nothing queued, or not in time
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+}
+extern "C" void wc_host_wgpu_frame_release(wc_host_t* host) {
+    if (!host->uses_wgpu) return;
+    v8::Locker locker(g_isolate);
+    v8::Isolate::Scope isolate_scope(g_isolate);
+    v8::HandleScope hs(g_isolate);
+    v8::Context::Scope cs(ctx());
+    wgpu_call(host, "readRelease");
+}
 extern "C" int wc_host_wgpu_frame_size(wc_host_t* host, uint32_t* w, uint32_t* h) {
     if (!host->uses_wgpu) return -1;
     v8::Locker locker(g_isolate);

@@ -27,6 +27,15 @@ module.exports = function createBridge(dir) {
     return j;
   };
 
+  // A readback buffer back to the free list, unmapped (or, still mapping,
+  // once its map lands).
+  const recycle = (ring, f) => {
+    if (!f.ready) { f.dropped = true; return; }
+    try { f.buffer.unmap(); } catch {}
+    if (ring.free.length < 3) ring.free.push(f); else f.buffer.destroy();
+  };
+  const dropFrame = (ring, f) => recycle(ring, f);
+
   return {
     isWgpuImportName: host.isWgpuImportName,
 
@@ -142,6 +151,72 @@ module.exports = function createBridge(dir) {
       return job(() => sessions.get(id).session.readFrame());
     },
 
+    // Pipelined readback, for a host that shows the frame through another
+    // API (the libretro core's GL framebuffer). readQueue starts copying the
+    // cart's current frame into one of a few MAP_READ buffers and maps it,
+    // without waiting; readTake hands out the OLDEST queued frame once its
+    // map has landed (null while it has not), so the host shows frame N-1
+    // while the GPU renders N and never waits for a GPU round trip it did
+    // not have to. The taken frame stays mapped until readRelease.
+    readQueue(id) {
+      const s = sessions.get(id);
+      const session = s?.session;
+      if (!session) return false;
+      let texture;
+      try { texture = session.context.getCurrentTexture(); } catch { return false; }
+      const w = texture.width, h = texture.height, format = texture.format;
+      const dev = session.device;
+      s.ring ??= { free: [], queued: [], taken: null };
+      const ring = s.ring;
+      // Up to 3 buffers in flight; a host that does not take them fast
+      // enough loses the oldest, never blocks here.
+      if (ring.queued.length >= 3) dropFrame(ring, ring.queued.shift());
+      const bytesPerRow = Math.ceil(w * 4 / 256) * 256;
+      const size = bytesPerRow * h;
+      let buffer = null;
+      while (ring.free.length) {
+        const b = ring.free.pop();
+        if (b.size === size && b.dev === dev) { buffer = b.buffer; break; }
+        b.buffer.destroy();
+      }
+      buffer ??= dev.createBuffer({ size, usage: 0x0008 /* COPY_DST */ | 0x0001 /* MAP_READ */ });
+      const encoder = dev.createCommandEncoder();
+      encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: h }, [w, h, 1]);
+      dev.queue.submit([encoder.finish()]);
+      const f = { buffer, dev, size, width: w, height: h, bytesPerRow, bgra: format.startsWith('bgra'), ready: false, failed: false, dropped: false };
+      buffer.mapAsync(0x0001 /* READ */).then(() => {
+        f.ready = true;
+        if (f.dropped) recycle(ring, f);
+      }, () => { f.failed = true; });
+      ring.queued.push(f);
+      return true;
+    },
+
+    // The oldest queued frame once mapped, leaving `keep` newer ones queued:
+    // { data: ArrayBuffer (bytesPerRow per row), width, height, bytesPerRow,
+    // bgra }, or null while its map has not landed (ask again after pumping
+    // Node). "none" when there is no such frame, so the host does not wait
+    // for nothing.
+    readTake(id, keep = 0) {
+      const ring = sessions.get(id)?.ring;
+      if (!ring) return 'none';
+      while (ring.queued.length && ring.queued[0].failed) ring.queued.shift();
+      if (ring.queued.length <= keep) return 'none';
+      const f = ring.queued[0];
+      if (!f) return 'none';
+      if (!f.ready) return null;
+      ring.queued.shift();
+      if (ring.taken) recycle(ring, ring.taken);
+      ring.taken = f;
+      return { data: f.buffer.getMappedRange(), width: f.width, height: f.height, bytesPerRow: f.bytesPerRow, bgra: f.bgra };
+    },
+
+    // The host is done with the frame readTake gave it.
+    readRelease(id) {
+      const ring = sessions.get(id)?.ring;
+      if (ring?.taken) { recycle(ring, ring.taken); ring.taken = null; }
+    },
+
     // A job: settles once the device is gone and the cart's pending callbacks
     // were answered. The host pumps it before tearing Node down.
     destroy(id) {
@@ -150,6 +225,12 @@ module.exports = function createBridge(dir) {
       return job(async () => {
         if (!s) return;
         try { s.surface?.destroy(); } catch {}
+        if (s.ring) {
+          for (const f of [...s.ring.free, ...s.ring.queued, ...(s.ring.taken ? [s.ring.taken] : [])]) {
+            try { f.buffer.destroy(); } catch {}
+          }
+          s.ring = null;
+        }
         await s.session.destroy();
         // Dawn rejects the cart's still-pending maps a couple of event-loop
         // turns AFTER device.lost (measured: 2 turns, every run). A promise

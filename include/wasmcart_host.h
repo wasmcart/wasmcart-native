@@ -445,6 +445,24 @@ const char* wc_host_gpu_lost(wc_host_t* host);
  * may lay out its own project size. Returns 0 and fills w/h, or -1 (not a
  * WebGPU cart, or no surface configured yet). */
 int wc_host_wgpu_frame_size(wc_host_t* host, uint32_t* w, uint32_t* h);
+/* Pipelined readback, for a host that shows a WebGPU cart's frame through
+ * another API (the libretro core's GL framebuffer) without waiting on the GPU
+ * every frame. After wc_host_run_frame, wc_host_wgpu_frame_queue starts
+ * copying the frame just rendered into a mapped buffer (no wait). 
+ * wc_host_wgpu_frame_take gives the oldest queued frame, leaving `keep` newer
+ * ones queued: keep 1 shows frame N-1 while the GPU works on N. It waits up
+ * to wait_ms for that frame's copy. 0 and *out filled (rows bytes_per_row
+ * apart, top row first; bgra: B, G, R, A byte order, else R, G, B, A), valid
+ * until wc_host_wgpu_frame_release; 1 when there is no frame to take. Up to
+ * 3 frames are queued; a host that takes none loses the oldest. */
+typedef struct {
+    const uint8_t* data;
+    uint32_t width, height, bytes_per_row;
+    int bgra;
+} wc_wgpu_frame_t;
+int  wc_host_wgpu_frame_queue(wc_host_t* host);
+int  wc_host_wgpu_frame_take(wc_host_t* host, wc_wgpu_frame_t* out, int keep, int wait_ms);
+void wc_host_wgpu_frame_release(wc_host_t* host);
 // Set a function that resolves GL function names to pointers.
 // For standalone: use eglGetProcAddress. For libretro: use retro_hw_get_proc_address.
 typedef void* (*wc_gl_get_proc_fn)(const char* name);
