@@ -362,6 +362,22 @@ void wc_host_pump(wc_host_t* host);
 // Run one frame — calls wc_render() on the cart
 void wc_host_run_frame(wc_host_t* host);
 
+// Frame profiling (a host's performance log, e.g. wasmcart-libretro's
+// wasmcart_perf_log option). Off by default; on, every GL import a cart calls
+// is timed and V8's garbage collections are counted, and wc_host_prof_take
+// returns the totals since the last take and starts them again.
+typedef struct {
+    double   gl_ms;            // time inside the cart's GL imports (the GL driver and the import glue)
+    uint32_t gl_calls;         // GL imports called
+    double   gl_max_ms;        // the slowest single GL import ...
+    const char* gl_max_name;   // ... and its name ("glFinish", ...), NULL when none ran
+    double   gc_ms;            // V8 garbage collection (prologue to epilogue)
+    uint32_t gc_count;
+    double   heap_used_mb;     // V8 heap in use at the take
+} wc_host_prof_t;
+void wc_host_prof_enable(int on);
+void wc_host_prof_take(wc_host_prof_t* out);
+
 // ─── Runtime code generation ───────────────────────────────────────────────
 // After writing a save state or rewind snapshot back into cart memory: unlink
 // every slot the cart linked (they are never carried across a restore), drop

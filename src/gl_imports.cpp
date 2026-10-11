@@ -12,6 +12,7 @@ extern "C" {
 #include <GLES2/gl2ext.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 }
 // AFTER the GLES headers: redirect every glXxx() in this file to a pointer loaded
 // from the host's get-proc-address (RetroArch's for the libretro core, EGL's for
@@ -153,8 +154,31 @@ static inline void* wptr(uint32_t p) {
 // Each GL function becomes a v8::FunctionCallback that unpacks args and
 // calls the real GL function. Same GL bodies as wasmtime version.
 
+// wc_host_prof_enable: each import timed (a scope, so a body's early return counts too)
+extern "C" {
+int wc_gl_prof_on = 0;
+double wc_gl_prof_ms = 0, wc_gl_prof_max_ms = 0;
+uint32_t wc_gl_prof_calls = 0;
+const char* wc_gl_prof_max_name = NULL;
+}
+struct GLProfScope {
+    const char* name;
+    struct timespec t0;
+    explicit GLProfScope(const char* n) : name(n) { if (wc_gl_prof_on) clock_gettime(CLOCK_MONOTONIC, &t0); }
+    ~GLProfScope() {
+        if (!wc_gl_prof_on) return;
+        struct timespec t1;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-6;
+        wc_gl_prof_ms += ms;
+        wc_gl_prof_calls++;
+        if (ms > wc_gl_prof_max_ms) { wc_gl_prof_max_ms = ms; wc_gl_prof_max_name = name; }
+    }
+};
+
 #define GL_REG(name, nparams, nresults, body) \
     static void _cb_##name(const v8::FunctionCallbackInfo<v8::Value>& _args) { \
+        GLProfScope _prof(#name); \
         v8::Local<v8::Context> _ctx = ctx(); \
         (void)_ctx; \
         wc_refresh_memory(_host); \

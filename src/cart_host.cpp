@@ -24,6 +24,7 @@ extern "C" {
 }
 
 #include <stdlib.h>
+#include <time.h>
 #include <string.h>
 #include <stdio.h>
 #include <random>
@@ -134,6 +135,7 @@ static int v8_init() {
     v8::V8::SetFlagsFromString("--turbo-inline-js-wasm-calls");
     v8::V8::SetFlagsFromString("--turbo-optimize-inlined-js-wasm-wrappers");
     v8::V8::SetFlagsFromString("--turboshaft-wasm-in-js-inlining");
+    if (const char* extra = getenv("WASMCART_V8_FLAGS")) v8::V8::SetFlagsFromString(extra); // profiling (--prof ...)
 
     std::vector<std::string> args = {"wasmcart-run"};
     auto result = node::InitializeOncePerProcess(args, {
@@ -3078,4 +3080,57 @@ extern "C" const wc_manifest_t* wc_host_get_manifest(wc_host_t* host) { return &
 extern "C" void* wc_host_get_memory(wc_host_t* host, uint32_t* size) {
     if (size) *size = host->memory_size;
     return host->memory;
+}
+
+// ─── Frame profiling (wasmcart_host.h: wc_host_prof_*) ─────────────────
+
+extern "C" {
+extern int wc_gl_prof_on;
+extern double wc_gl_prof_ms, wc_gl_prof_max_ms;
+extern uint32_t wc_gl_prof_calls;
+extern const char* wc_gl_prof_max_name;
+}
+static double prof_gc_ms = 0, prof_gc_t0 = 0;
+static uint32_t prof_gc_count = 0;
+static bool prof_gc_hooked = false;
+static double prof_now_ms() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec * 1e-6;
+}
+static void prof_gc_begin(v8::Isolate*, v8::GCType, v8::GCCallbackFlags) { prof_gc_t0 = prof_now_ms(); }
+static void prof_gc_end(v8::Isolate*, v8::GCType, v8::GCCallbackFlags) {
+    if (prof_gc_t0 > 0) prof_gc_ms += prof_now_ms() - prof_gc_t0;
+    prof_gc_t0 = 0;
+    prof_gc_count++;
+}
+
+extern "C" void wc_host_prof_enable(int on) {
+    wc_gl_prof_on = on ? 1 : 0;
+    if (on && g_isolate && !prof_gc_hooked) {
+        g_isolate->AddGCPrologueCallback(prof_gc_begin);
+        g_isolate->AddGCEpilogueCallback(prof_gc_end);
+        prof_gc_hooked = true;
+    }
+}
+
+extern "C" void wc_host_prof_take(wc_host_prof_t* out) {
+    if (!out) return;
+    out->gl_ms = wc_gl_prof_ms;
+    out->gl_calls = wc_gl_prof_calls;
+    out->gl_max_ms = wc_gl_prof_max_ms;
+    out->gl_max_name = wc_gl_prof_max_name;
+    out->gc_ms = prof_gc_ms;
+    out->gc_count = prof_gc_count;
+    out->heap_used_mb = 0;
+    if (g_isolate) {
+        v8::HeapStatistics hs;
+        g_isolate->GetHeapStatistics(&hs);
+        out->heap_used_mb = (double)hs.used_heap_size() / (1024.0 * 1024.0);
+    }
+    wc_gl_prof_ms = wc_gl_prof_max_ms = 0;
+    wc_gl_prof_calls = 0;
+    wc_gl_prof_max_name = NULL;
+    prof_gc_ms = 0;
+    prof_gc_count = 0;
 }
