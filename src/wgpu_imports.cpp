@@ -74,7 +74,9 @@ namespace {
     X(wgpuComputePassEncoderDispatchWorkgroups) \
     X(wgpuComputePassEncoderDispatchWorkgroupsIndirect) \
     X(wgpuComputePassEncoderEnd) \
-    X(wgpuQueueWriteBuffer)
+    X(wgpuQueueWriteBuffer) \
+    X(wgpuCommandEncoderBeginRenderPass) \
+    X(wgpuRenderPassEncoderRelease)
 
 struct Procs {
 #define X(name) decltype(&::name) name = nullptr;
@@ -136,6 +138,7 @@ class HandleMap {
         for (size_t i = 0; i < ok.size(); i++) if (ok[i]) set(ok[i], ov[i]);
     }
 public:
+    template <class F> void each(F f) const { for (size_t i = 0; i < keys_.size(); i++) if (keys_[i]) f(keys_[i], vals_[i]); }
     void* get(uint32_t k) const {
         if (!count_) return nullptr;
         for (uint32_t i = slot(k);; i = (i + 1) & mask_) {
@@ -187,6 +190,14 @@ struct Session {
     // import, and how many (the cart is stopped after the frame)
     const char* failed = nullptr;
     uint64_t failed_calls = 0;
+    // wgpuCommandEncoderBeginRenderPass served here (begin_pass_cb): the
+    // cart's emwgpuCreateRenderPassEncoder export, which makes the pass's
+    // handle in cart memory, the glue's function for a descriptor this does
+    // not take, and the passes made here (their reference is released when
+    // the cart releases the handle)
+    v8::Global<v8::Function> create_pass, begin_pass_glue;
+    HandleMap owned;
+    CallData begin_call{ nullptr, -1 };
 };
 std::unordered_map<wc_host_t*, Session*> g_sessions;
 
@@ -437,6 +448,83 @@ const Native kNatives[] = {
 #undef E
 constexpr int kNativeCount = (int)(sizeof kNatives / sizeof kNatives[0]);
 
+// wgpuCommandEncoderBeginRenderPass(encoder, descriptor) -> pass. Through the
+// glue it built the descriptor as JavaScript objects for dawn.node to convert
+// back (about 8 us a pass; three.c's frames have ~30 passes). Here the
+// descriptor is read from cart memory into webgpu.h's structs and Dawn is
+// called directly; the pass gets its handle from the cart's own
+// emwgpuCreateRenderPassEncoder, as the glue's does, and only this table
+// knows it (installed only when every pass call the cart imports is served
+// here). A descriptor with chained structs or timestamp writes, or naming an
+// object with no native handle, goes to the glue's function.
+void begin_pass_cb(const v8::FunctionCallbackInfo<v8::Value>& a) {
+    auto* d = (CallData*)a.Data().As<v8::External>()->Value();
+    Session* s = d->s;
+    SlowArgs A{ a };
+    auto glue = [&] {
+        s->fallback_calls++;
+        v8::Local<v8::Value> argv[2] = { a[0], a[1] };
+        v8::Local<v8::Value> r;
+        if (s->begin_pass_glue.Get(g_isolate)->Call(ctx(), v8::Undefined(g_isolate), 2, argv).ToLocal(&r)) a.GetReturnValue().Set(r);
+    };
+    void* enc = H(s, A.u32(0));
+    uint32_t dp = A.u32(1);
+    if (!enc || !dp || s->create_pass.IsEmpty()) return glue();
+    wc_refresh_memory(s->host);
+    const uint8_t* m = s->host->memory;
+    const uint64_t size = s->host->memory_size;
+    auto u32at = [&](uint64_t off) { uint32_t v; memcpy(&v, m + off, 4); return v; };
+    if ((uint64_t)dp + 32 > size) return glue();
+    uint32_t count = u32at(dp + 12), cap = u32at(dp + 16), dsa = u32at(dp + 20), occ = u32at(dp + 24);
+    if (u32at(dp) || u32at(dp + 28) || count > 8) return glue();
+    WGPURenderPassColorAttachment ca[8];
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t b = (uint64_t)cap + 56ull * i;
+        if (b + 56 > size || u32at(b)) return glue();
+        uint32_t view = u32at(b + 4), resolve = u32at(b + 12);
+        ca[i] = WGPURenderPassColorAttachment{};
+        ca[i].view = (WGPUTextureView)H(s, view);
+        ca[i].resolveTarget = (WGPUTextureView)H(s, resolve);
+        if ((view && !ca[i].view) || (resolve && !ca[i].resolveTarget)) return glue();
+        ca[i].depthSlice = u32at(b + 8);
+        ca[i].loadOp = (WGPULoadOp)u32at(b + 16);
+        ca[i].storeOp = (WGPUStoreOp)u32at(b + 20);
+        memcpy(&ca[i].clearValue, m + b + 24, sizeof(WGPUColor));
+    }
+    WGPURenderPassDepthStencilAttachment ds{};
+    if (dsa) {
+        if ((uint64_t)dsa + 40 > size || u32at(dsa)) return glue();
+        ds.view = (WGPUTextureView)H(s, u32at(dsa + 4));
+        if (!ds.view) return glue();
+        ds.depthLoadOp = (WGPULoadOp)u32at(dsa + 8);
+        ds.depthStoreOp = (WGPUStoreOp)u32at(dsa + 12);
+        memcpy(&ds.depthClearValue, m + dsa + 16, 4);
+        ds.depthReadOnly = u32at(dsa + 20);
+        ds.stencilLoadOp = (WGPULoadOp)u32at(dsa + 24);
+        ds.stencilStoreOp = (WGPUStoreOp)u32at(dsa + 28);
+        ds.stencilClearValue = u32at(dsa + 32);
+        ds.stencilReadOnly = u32at(dsa + 36);
+    }
+    WGPURenderPassDescriptor desc{};
+    desc.label = WGPUStringView{ nullptr, WGPU_STRLEN };
+    desc.colorAttachmentCount = count;
+    desc.colorAttachments = count ? ca : nullptr;
+    desc.depthStencilAttachment = dsa ? &ds : nullptr;
+    desc.occlusionQuerySet = (WGPUQuerySet)H(s, occ);
+    if (occ && !desc.occlusionQuerySet) return glue();
+    // the cart's handle first (it runs the cart's code: memory may grow)
+    v8::Local<v8::Value> zero = v8::Integer::New(g_isolate, 0), r;
+    if (!s->create_pass.Get(g_isolate)->Call(ctx(), v8::Undefined(g_isolate), 1, &zero).ToLocal(&r)) return;  // trapped
+    uint32_t ptr = r->Uint32Value(ctx()).FromMaybe(0);
+    if (!ptr) return glue();
+    WGPURenderPassEncoder pass = P.wgpuCommandEncoderBeginRenderPass((WGPUCommandEncoder)enc, &desc);
+    s->handles.set(ptr, pass);
+    s->owned.set(ptr, pass);
+    s->native_calls++;
+    wc_wgpu_native_calls_total++;
+    a.GetReturnValue().Set(ptr);
+}
+
 void register_cb(const v8::FunctionCallbackInfo<v8::Value>& a) {
     auto* s = (Session*)a.Data().As<v8::External>()->Value();
     if (a.Length() < 2 || !a[1]->IsBigInt()) return;
@@ -446,7 +534,13 @@ void register_cb(const v8::FunctionCallbackInfo<v8::Value>& a) {
 }
 void forget_cb(const v8::FunctionCallbackInfo<v8::Value>& a) {
     auto* s = (Session*)a.Data().As<v8::External>()->Value();
-    if (a.Length() >= 1) s->handles.erase(SlowArgs{ a }.u32(0));
+    if (a.Length() < 1) return;
+    uint32_t ptr = SlowArgs{ a }.u32(0);
+    s->handles.erase(ptr);
+    if (void* pass = s->owned.get(ptr)) {
+        P.wgpuRenderPassEncoderRelease((WGPURenderPassEncoder)pass);
+        s->owned.erase(ptr);
+    }
 }
 
 }  // namespace
@@ -519,7 +613,42 @@ int wc_wgpu_native_install(wc_host_t* host, v8::Local<v8::Object> env, v8::Local
         wgpu_mod->Set(ctx(), key, fn).Check();
         n++;
     }
+    // wgpuCommandEncoderBeginRenderPass here too, when every pass call the
+    // cart imports is served here (a pass made here has no glue object)
+    bool passes_native = true;
+    v8::Local<v8::Value> begin_glue;
+    auto begin_key = v8::String::NewFromUtf8Literal(g_isolate, "wgpuCommandEncoderBeginRenderPass");
+    v8::Local<v8::Array> names;
+    if (!wgpu_mod->Get(ctx(), begin_key).ToLocal(&begin_glue) || !begin_glue->IsFunction() ||
+        !wgpu_mod->GetOwnPropertyNames(ctx()).ToLocal(&names)) passes_native = false;
+    for (uint32_t i = 0; passes_native && i < names->Length(); i++) {
+        v8::Local<v8::Value> k;
+        if (!names->Get(ctx(), i).ToLocal(&k)) { passes_native = false; break; }
+        v8::String::Utf8Value nm(g_isolate, k);
+        if (!*nm || strncmp(*nm, "wgpuRenderPassEncoder", 21) != 0) continue;
+        bool served = false;
+        for (int j = 0; j < kNativeCount; j++) if (!strcmp(*nm, kNatives[j].name)) served = true;
+        if (!served) passes_native = false;
+    }
+    if (passes_native) {
+        s->begin_pass_glue.Reset(g_isolate, begin_glue.As<v8::Function>());
+        s->begin_call = CallData{ s, -1 };
+        auto t = v8::FunctionTemplate::New(g_isolate, begin_pass_cb, v8::External::New(g_isolate, &s->begin_call));
+        auto fn = t->GetFunction(ctx()).ToLocalChecked();
+        env->Set(ctx(), begin_key, fn).Check();
+        wgpu_mod->Set(ctx(), begin_key, fn).Check();
+        n++;
+    }
     return n;
+}
+
+// The cart's instance exists: the export begin_pass_cb makes pass handles with.
+void wc_wgpu_native_attach(wc_host_t* host, v8::Local<v8::Object> exports) {
+    auto it = g_sessions.find(host);
+    if (it == g_sessions.end()) return;
+    v8::Local<v8::Value> f;
+    if (exports->Get(ctx(), v8::String::NewFromUtf8Literal(g_isolate, "emwgpuCreateRenderPassEncoder")).ToLocal(&f) && f->IsFunction())
+        it->second->create_pass.Reset(g_isolate, f.As<v8::Function>());
 }
 
 // The host unloaded its cart (whose instance, and so its imports, are gone):
@@ -533,6 +662,9 @@ void wc_wgpu_native_drop(wc_host_t* host) {
                (unsigned long long)it->second->fallback_calls,
                (unsigned long long)(it->second->fallback_calls + it->second->native_calls));
     for (auto& f : it->second->fallback) f.Reset();
+    it->second->owned.each([](uint32_t, void* pass) { P.wgpuRenderPassEncoderRelease((WGPURenderPassEncoder)pass); });
+    it->second->create_pass.Reset();
+    it->second->begin_pass_glue.Reset();
     delete it->second;
     g_sessions.erase(it);
 }
@@ -560,6 +692,7 @@ extern "C" bool wc_wgpu_native_init(const char*) { return false; }
 void* wc_wgpu_proc(const char*) { return nullptr; }
 v8::Local<v8::Value> wc_wgpu_native_table(wc_host_t*) { return v8::Undefined(g_isolate); }
 int wc_wgpu_native_install(wc_host_t*, v8::Local<v8::Object>, v8::Local<v8::Object>) { return 0; }
+void wc_wgpu_native_attach(wc_host_t*, v8::Local<v8::Object>) {}
 void wc_wgpu_native_drop(wc_host_t*) {}
 extern "C" void wc_host_wgpu_native_stats(wc_host_t*, uint64_t* n, uint64_t* f) { *n = *f = 0; }
 const char* wc_wgpu_native_failed(wc_host_t*, uint64_t*) { return nullptr; }

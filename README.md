@@ -146,7 +146,12 @@ The calls a frame makes most (a render or compute pass's state, draws and
 dispatches, and the queue's buffer writes) call Dawn's C API from C++
 (`src/wgpu_imports.cpp`), as the GL imports do, on the objects the glue
 made (native-dawn's `objectHandle`); the rest go through the glue. They are
-V8 fast API functions, as the GL imports are (below). Dawn's
+V8 fast API functions, as the GL imports are (below). When every render-pass
+call the cart imports is one of these, `wgpuCommandEncoderBeginRenderPass` is
+served from C++ too: the descriptor is read from cart memory into webgpu.h's
+structs (the glue built it as JavaScript objects for dawn.node to convert back,
+about 8 us a pass), and the pass gets its handle from the cart's own
+`emwgpuCreateRenderPassEncoder`. Dawn's
 validation is off unless asked for (above). When the cart's canvas is the
 window's size, it draws straight into the window's texture; any other size is
 letterboxed with a copy.

@@ -84,9 +84,12 @@ module.exports = function createBridge(dir) {
         if (native) {
           if (typeof dawn.objectHandle !== 'function') throw new Error(`${path.join(dir, 'dawn.node')} has no objectHandle (native-dawn 0.1.4 or newer is needed)`);
           // the objects the native imports name (passes, pipelines, bind
-          // groups, buffers, queues, bundles); nothing else needs a handle
+          // groups, buffers, queues, bundles, and for a render pass begun
+          // natively its encoder, views and occlusion query set); nothing
+          // else needs a handle
           const named = new Set(['GPURenderPassEncoder', 'GPUComputePassEncoder', 'GPURenderPipeline', 'GPUComputePipeline',
-            'GPUBindGroup', 'GPUBuffer', 'GPUQueue', 'GPURenderBundle'].map(c => dawn.globals[c]));
+            'GPUBindGroup', 'GPUBuffer', 'GPUQueue', 'GPURenderBundle', 'GPUCommandEncoder', 'GPUTextureView',
+            'GPUQuerySet'].map(c => dawn.globals[c]));
           onObject = (ptr, obj) => {
             if (!named.has(obj?.constructor)) return;
             const h = dawn.objectHandle(obj);
@@ -143,6 +146,19 @@ module.exports = function createBridge(dir) {
 
     begin(id) {
       sessions.get(id)?.session.beginFrame();
+    },
+
+    // Before a frame, in one call: { lost } (as lost()), { fatal } (as
+    // fatal()), or undefined when the frame begins (as begin()).
+    frameBegin(id) {
+      const s = sessions.get(id);
+      if (!s) return undefined;
+      const lost = this.lost(id);
+      if (lost !== null) return { lost };
+      const fatal = this.fatal(id);
+      if (fatal !== null) return { fatal };
+      s.session.beginFrame();
+      return undefined;
     },
 
     // After wc_render: the frame's last submit is done (wasmcart destroys the
