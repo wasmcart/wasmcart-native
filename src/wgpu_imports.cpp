@@ -112,11 +112,73 @@ bool resolve_procs(const std::string& dir) {
 
 // ── the cart pointer -> native handle table, per host ─────────────────────
 
+// Open addressing with linear probing over cart pointers (never 0): a lookup
+// is a multiply and, nearly always, one probe, where std::unordered_map
+// chased a node per lookup (the direct calls make two or three a call).
+// Deletion shifts the run back, so there are no tombstones.
+class HandleMap {
+    std::vector<uint32_t> keys_;
+    std::vector<void*> vals_;
+    uint32_t mask_ = 0, count_ = 0;
+    int shift_ = 32;
+    uint32_t slot(uint32_t k) const { return (uint32_t)((k * 2654435769u) >> shift_) & mask_; }
+    void grow() {
+        std::vector<uint32_t> ok = std::move(keys_);
+        std::vector<void*> ov = std::move(vals_);
+        uint32_t cap = ok.empty() ? 1024 : (uint32_t)ok.size() * 2;
+        keys_.assign(cap, 0);
+        vals_.assign(cap, nullptr);
+        mask_ = cap - 1;
+        int bits = 0;
+        while ((1u << bits) < cap) bits++;
+        shift_ = 32 - bits;
+        count_ = 0;
+        for (size_t i = 0; i < ok.size(); i++) if (ok[i]) set(ok[i], ov[i]);
+    }
+public:
+    void* get(uint32_t k) const {
+        if (!count_) return nullptr;
+        for (uint32_t i = slot(k);; i = (i + 1) & mask_) {
+            uint32_t c = keys_[i];
+            if (c == k) return vals_[i];
+            if (!c) return nullptr;
+        }
+    }
+    void set(uint32_t k, void* v) {
+        if ((count_ + 1) * 4 >= (mask_ + 1) * 3 || keys_.empty()) grow();
+        for (uint32_t i = slot(k);; i = (i + 1) & mask_) {
+            if (keys_[i] == k) { vals_[i] = v; return; }
+            if (!keys_[i]) { keys_[i] = k; vals_[i] = v; count_++; return; }
+        }
+    }
+    void erase(uint32_t k) {
+        if (!count_) return;
+        uint32_t i = slot(k);
+        while (keys_[i] != k) { if (!keys_[i]) return; i = (i + 1) & mask_; }
+        // shift the following entries of the run back over the hole
+        for (uint32_t j = i;;) {
+            keys_[i] = 0;
+            vals_[i] = nullptr;
+            for (;;) {
+                j = (j + 1) & mask_;
+                if (!keys_[j]) { count_--; return; }
+                uint32_t h = slot(keys_[j]);
+                // keys_[j] may move to i unless its home lies cyclically in (i, j]
+                bool stays = i <= j ? (i < h && h <= j) : (i < h || h <= j);
+                if (!stays) break;
+            }
+            keys_[i] = keys_[j];
+            vals_[i] = vals_[j];
+            i = j;
+        }
+    }
+};
+
 struct Session;
 struct CallData { Session* s; int index; };
 struct Session {
     wc_host_t* host;
-    std::unordered_map<uint32_t, void*> handles;
+    HandleMap handles;
     // the glue's function for each native import, called when a handle is missing
     std::vector<v8::Global<v8::Function>> fallback;
     std::vector<CallData> calls;  // each native import's callback data
@@ -130,8 +192,7 @@ std::unordered_map<wc_host_t*, Session*> g_sessions;
 
 inline void* H(Session* s, uint32_t ptr) {
     if (!ptr) return nullptr;
-    auto it = s->handles.find(ptr);
-    return it == s->handles.end() ? nullptr : it->second;
+    return s->handles.get(ptr);
 }
 
 // ── arguments ─────────────────────────────────────────────────────────────
@@ -381,7 +442,7 @@ void register_cb(const v8::FunctionCallbackInfo<v8::Value>& a) {
     if (a.Length() < 2 || !a[1]->IsBigInt()) return;
     uint32_t ptr = SlowArgs{ a }.u32(0);
     void* h = (void*)(uintptr_t)a[1].As<v8::BigInt>()->Uint64Value();
-    if (ptr && h) s->handles[ptr] = h;
+    if (ptr && h) s->handles.set(ptr, h);
 }
 void forget_cb(const v8::FunctionCallbackInfo<v8::Value>& a) {
     auto* s = (Session*)a.Data().As<v8::External>()->Value();
