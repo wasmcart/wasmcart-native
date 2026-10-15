@@ -21,6 +21,8 @@
 // time, so a build without WebGPU support needs nothing of it.
 
 #include "v8.h"
+#include "v8-fast-api-calls.h"
+#include <utility>
 extern "C" {
 #include "cart_host.h"
 }
@@ -33,6 +35,8 @@ extern "C" {
 extern v8::Isolate* g_isolate;
 extern v8::Local<v8::Context> ctx();
 extern "C" void wc_refresh_memory(wc_host_t* host);
+// WebGPU calls served by Dawn directly, every host's (the performance log)
+uint64_t wc_wgpu_native_calls_total = 0;
 
 #ifdef WASMCART_WGPU_NATIVE
 #include <webgpu/webgpu.h>
@@ -117,6 +121,10 @@ struct Session {
     std::vector<v8::Global<v8::Function>> fallback;
     std::vector<CallData> calls;  // each native import's callback data
     uint64_t native_calls = 0, fallback_calls = 0;
+    // a fast call that named an object with no native handle: the first one's
+    // import, and how many (the cart is stopped after the frame)
+    const char* failed = nullptr;
+    uint64_t failed_calls = 0;
 };
 std::unordered_map<wc_host_t*, Session*> g_sessions;
 
@@ -126,28 +134,45 @@ inline void* H(Session* s, uint32_t ptr) {
     return it == s->handles.end() ? nullptr : it->second;
 }
 
-// ── argument helpers (wasm i32 -> Number, i64 -> BigInt, f32 -> Number) ──
+// ── arguments ─────────────────────────────────────────────────────────────
+// A native import has two entry points sharing one body, as the GL imports
+// do (gl_imports.cpp): a V8 callback (wasm i32 -> Number, i64 -> BigInt,
+// f32 -> Number), and a V8 fast API function in the import's C types, which
+// the cart's wasm calls directly when the signatures match.
 
-inline uint32_t U32(const v8::FunctionCallbackInfo<v8::Value>& a, int i) {
-    v8::Local<v8::Value> v = a[i];
-    if (v->IsInt32()) return (uint32_t)v.As<v8::Int32>()->Value();
-    return v->Uint32Value(ctx()).FromMaybe(0);
-}
-inline int32_t I32(const v8::FunctionCallbackInfo<v8::Value>& a, int i) {
-    v8::Local<v8::Value> v = a[i];
-    if (v->IsInt32()) return v.As<v8::Int32>()->Value();
-    return v->Int32Value(ctx()).FromMaybe(0);
-}
-inline double F64(const v8::FunctionCallbackInfo<v8::Value>& a, int i) {
-    v8::Local<v8::Value> v = a[i];
-    if (v->IsNumber()) return v.As<v8::Number>()->Value();
-    return v->NumberValue(ctx()).FromMaybe(0);
-}
-inline uint64_t U64(const v8::FunctionCallbackInfo<v8::Value>& a, int i) {
-    v8::Local<v8::Value> v = a[i];
-    if (v->IsBigInt()) return v.As<v8::BigInt>()->Uint64Value();
-    return (uint64_t)F64(a, i);
-}
+struct SlowArgs {
+    const v8::FunctionCallbackInfo<v8::Value>& a;
+    uint32_t u32(int i) const {
+        v8::Local<v8::Value> v = a[i];
+        if (v->IsInt32()) return (uint32_t)v.As<v8::Int32>()->Value();
+        return v->Uint32Value(ctx()).FromMaybe(0);
+    }
+    int32_t i32(int i) const {
+        v8::Local<v8::Value> v = a[i];
+        if (v->IsInt32()) return v.As<v8::Int32>()->Value();
+        return v->Int32Value(ctx()).FromMaybe(0);
+    }
+    double f64(int i) const {
+        v8::Local<v8::Value> v = a[i];
+        if (v->IsNumber()) return v.As<v8::Number>()->Value();
+        return v->NumberValue(ctx()).FromMaybe(0);
+    }
+    uint64_t u64(int i) const {
+        v8::Local<v8::Value> v = a[i];
+        if (v->IsBigInt()) return v.As<v8::BigInt>()->Uint64Value();
+        return (uint64_t)f64(i);
+    }
+};
+struct FastArgs {
+    union { int32_t i; uint32_t u; float f; uint64_t l; } v[8];
+    uint32_t u32(int i) const { return v[i].u; }
+    int32_t i32(int i) const { return v[i].i; }
+    double f64(int i) const { return v[i].f; }
+    uint64_t u64(int i) const { return v[i].l; }
+    void put(int n, int32_t x) { v[n].l = 0; v[n].i = x; }
+    void put(int n, float x) { v[n].l = 0; v[n].f = x; }
+    void put(int n, int64_t x) { v[n].l = (uint64_t)x; }
+};
 
 void call_fallback(Session* s, int index, const v8::FunctionCallbackInfo<v8::Value>& a) {
     s->fallback_calls++;
@@ -158,153 +183,209 @@ void call_fallback(Session* s, int index, const v8::FunctionCallbackInfo<v8::Val
         a.GetReturnValue().Set(r);
 }
 
-// The native imports. Each: its name, and a body that returns false when a
-// handle it needs is missing (the glue's function runs instead).
-using Body = bool (*)(Session*, const v8::FunctionCallbackInfo<v8::Value>&);
-struct Native { const char* name; Body body; };
-
-#define S(i) H(s, U32(a, i))
+// The native imports. Each: its name, its wasm signature (i = i32, f = f32,
+// l = i64: emdawnwebgpu's webgpu.h on wasm32), and a body that returns false
+// when a handle it needs is missing. From the callback, the glue's function
+// then runs instead; a fast call cannot run JavaScript, so it records the
+// call and the host stops the cart after the frame, saying which import
+// (every object these calls name is registered when the glue makes it, so
+// none should be missing).
+#define S(i) H(s, a.u32(i))
 #define NEED(h) if (!(h)) return false
+#define NATIVE(nm, sig_str, ...) \
+    struct N_##nm { \
+        static constexpr const char* name = #nm; \
+        static constexpr const char sig[] = sig_str; \
+        template <class A> static bool run(Session* s, const A& a) __VA_ARGS__ \
+    };
 
-const Native kNatives[] = {
-    { "wgpuRenderPassEncoderSetPipeline", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); void* pipe = S(1); NEED(pass); NEED(pipe);
-        P.wgpuRenderPassEncoderSetPipeline((WGPURenderPassEncoder)pass, (WGPURenderPipeline)pipe);
-        return true; } },
-    { "wgpuRenderPassEncoderSetBindGroup", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); uint32_t gptr = U32(a, 2); void* group = H(s, gptr); NEED(pass); if (gptr) NEED(group);
-        uint32_t count = U32(a, 3), offs = U32(a, 4);
-        const uint32_t* offsets = nullptr;
-        if (count) {
-            wc_refresh_memory(s->host);
-            if ((uint64_t)offs + (uint64_t)count * 4 > s->host->memory_size) return false;
-            offsets = (const uint32_t*)(s->host->memory + offs);
-        }
-        P.wgpuRenderPassEncoderSetBindGroup((WGPURenderPassEncoder)pass, U32(a, 1), (WGPUBindGroup)group, count, offsets);
-        return true; } },
-    { "wgpuRenderPassEncoderSetVertexBuffer", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); uint32_t bptr = U32(a, 2); void* buf = H(s, bptr); NEED(pass); if (bptr) NEED(buf);
-        P.wgpuRenderPassEncoderSetVertexBuffer((WGPURenderPassEncoder)pass, U32(a, 1), (WGPUBuffer)buf, U64(a, 3), U64(a, 4));
-        return true; } },
-    { "wgpuRenderPassEncoderSetIndexBuffer", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); void* buf = S(1); NEED(pass); NEED(buf);
-        P.wgpuRenderPassEncoderSetIndexBuffer((WGPURenderPassEncoder)pass, (WGPUBuffer)buf, (WGPUIndexFormat)U32(a, 2), U64(a, 3), U64(a, 4));
-        return true; } },
-    { "wgpuRenderPassEncoderDraw", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); NEED(pass);
-        P.wgpuRenderPassEncoderDraw((WGPURenderPassEncoder)pass, U32(a, 1), U32(a, 2), U32(a, 3), U32(a, 4));
-        return true; } },
-    { "wgpuRenderPassEncoderDrawIndexed", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); NEED(pass);
-        P.wgpuRenderPassEncoderDrawIndexed((WGPURenderPassEncoder)pass, U32(a, 1), U32(a, 2), U32(a, 3), I32(a, 4), U32(a, 5));
-        return true; } },
-    { "wgpuRenderPassEncoderDrawIndirect", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); void* buf = S(1); NEED(pass); NEED(buf);
-        P.wgpuRenderPassEncoderDrawIndirect((WGPURenderPassEncoder)pass, (WGPUBuffer)buf, U64(a, 2));
-        return true; } },
-    { "wgpuRenderPassEncoderDrawIndexedIndirect", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); void* buf = S(1); NEED(pass); NEED(buf);
-        P.wgpuRenderPassEncoderDrawIndexedIndirect((WGPURenderPassEncoder)pass, (WGPUBuffer)buf, U64(a, 2));
-        return true; } },
-    { "wgpuRenderPassEncoderSetViewport", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); NEED(pass);
-        P.wgpuRenderPassEncoderSetViewport((WGPURenderPassEncoder)pass, (float)F64(a, 1), (float)F64(a, 2), (float)F64(a, 3),
-                                           (float)F64(a, 4), (float)F64(a, 5), (float)F64(a, 6));
-        return true; } },
-    { "wgpuRenderPassEncoderSetScissorRect", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); NEED(pass);
-        P.wgpuRenderPassEncoderSetScissorRect((WGPURenderPassEncoder)pass, U32(a, 1), U32(a, 2), U32(a, 3), U32(a, 4));
-        return true; } },
-    { "wgpuRenderPassEncoderSetStencilReference", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); NEED(pass);
-        P.wgpuRenderPassEncoderSetStencilReference((WGPURenderPassEncoder)pass, U32(a, 1));
-        return true; } },
-    { "wgpuRenderPassEncoderSetBlendConstant", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); NEED(pass);
-        uint32_t c = U32(a, 1);
+NATIVE(wgpuRenderPassEncoderSetPipeline, "ii>", {
+    void* pass = S(0); void* pipe = S(1); NEED(pass); NEED(pipe);
+    P.wgpuRenderPassEncoderSetPipeline((WGPURenderPassEncoder)pass, (WGPURenderPipeline)pipe);
+    return true; })
+NATIVE(wgpuRenderPassEncoderSetBindGroup, "iiiii>", {
+    void* pass = S(0); uint32_t gptr = a.u32(2); void* group = H(s, gptr); NEED(pass); if (gptr) NEED(group);
+    uint32_t count = a.u32(3), offs = a.u32(4);
+    const uint32_t* offsets = nullptr;
+    if (count) {
         wc_refresh_memory(s->host);
-        if ((c & 7) || (uint64_t)c + sizeof(WGPUColor) > s->host->memory_size) return false;
-        P.wgpuRenderPassEncoderSetBlendConstant((WGPURenderPassEncoder)pass, (const WGPUColor*)(s->host->memory + c));
-        return true; } },
-    { "wgpuRenderPassEncoderBeginOcclusionQuery", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); NEED(pass);
-        P.wgpuRenderPassEncoderBeginOcclusionQuery((WGPURenderPassEncoder)pass, U32(a, 1));
-        return true; } },
-    { "wgpuRenderPassEncoderEndOcclusionQuery", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); NEED(pass);
-        P.wgpuRenderPassEncoderEndOcclusionQuery((WGPURenderPassEncoder)pass);
-        return true; } },
-    { "wgpuRenderPassEncoderExecuteBundles", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); NEED(pass);
-        uint32_t n = U32(a, 1), list = U32(a, 2);
+        if ((uint64_t)offs + (uint64_t)count * 4 > s->host->memory_size) return false;
+        offsets = (const uint32_t*)(s->host->memory + offs);
+    }
+    P.wgpuRenderPassEncoderSetBindGroup((WGPURenderPassEncoder)pass, a.u32(1), (WGPUBindGroup)group, count, offsets);
+    return true; })
+NATIVE(wgpuRenderPassEncoderSetVertexBuffer, "iiill>", {
+    void* pass = S(0); uint32_t bptr = a.u32(2); void* buf = H(s, bptr); NEED(pass); if (bptr) NEED(buf);
+    P.wgpuRenderPassEncoderSetVertexBuffer((WGPURenderPassEncoder)pass, a.u32(1), (WGPUBuffer)buf, a.u64(3), a.u64(4));
+    return true; })
+NATIVE(wgpuRenderPassEncoderSetIndexBuffer, "iiill>", {
+    void* pass = S(0); void* buf = S(1); NEED(pass); NEED(buf);
+    P.wgpuRenderPassEncoderSetIndexBuffer((WGPURenderPassEncoder)pass, (WGPUBuffer)buf, (WGPUIndexFormat)a.u32(2), a.u64(3), a.u64(4));
+    return true; })
+NATIVE(wgpuRenderPassEncoderDraw, "iiiii>", {
+    void* pass = S(0); NEED(pass);
+    P.wgpuRenderPassEncoderDraw((WGPURenderPassEncoder)pass, a.u32(1), a.u32(2), a.u32(3), a.u32(4));
+    return true; })
+NATIVE(wgpuRenderPassEncoderDrawIndexed, "iiiiii>", {
+    void* pass = S(0); NEED(pass);
+    P.wgpuRenderPassEncoderDrawIndexed((WGPURenderPassEncoder)pass, a.u32(1), a.u32(2), a.u32(3), a.i32(4), a.u32(5));
+    return true; })
+NATIVE(wgpuRenderPassEncoderDrawIndirect, "iil>", {
+    void* pass = S(0); void* buf = S(1); NEED(pass); NEED(buf);
+    P.wgpuRenderPassEncoderDrawIndirect((WGPURenderPassEncoder)pass, (WGPUBuffer)buf, a.u64(2));
+    return true; })
+NATIVE(wgpuRenderPassEncoderDrawIndexedIndirect, "iil>", {
+    void* pass = S(0); void* buf = S(1); NEED(pass); NEED(buf);
+    P.wgpuRenderPassEncoderDrawIndexedIndirect((WGPURenderPassEncoder)pass, (WGPUBuffer)buf, a.u64(2));
+    return true; })
+NATIVE(wgpuRenderPassEncoderSetViewport, "iffffff>", {
+    void* pass = S(0); NEED(pass);
+    P.wgpuRenderPassEncoderSetViewport((WGPURenderPassEncoder)pass, (float)a.f64(1), (float)a.f64(2), (float)a.f64(3),
+                                       (float)a.f64(4), (float)a.f64(5), (float)a.f64(6));
+    return true; })
+NATIVE(wgpuRenderPassEncoderSetScissorRect, "iiiii>", {
+    void* pass = S(0); NEED(pass);
+    P.wgpuRenderPassEncoderSetScissorRect((WGPURenderPassEncoder)pass, a.u32(1), a.u32(2), a.u32(3), a.u32(4));
+    return true; })
+NATIVE(wgpuRenderPassEncoderSetStencilReference, "ii>", {
+    void* pass = S(0); NEED(pass);
+    P.wgpuRenderPassEncoderSetStencilReference((WGPURenderPassEncoder)pass, a.u32(1));
+    return true; })
+NATIVE(wgpuRenderPassEncoderSetBlendConstant, "ii>", {
+    void* pass = S(0); NEED(pass);
+    uint32_t c = a.u32(1);
+    wc_refresh_memory(s->host);
+    if ((c & 7) || (uint64_t)c + sizeof(WGPUColor) > s->host->memory_size) return false;
+    P.wgpuRenderPassEncoderSetBlendConstant((WGPURenderPassEncoder)pass, (const WGPUColor*)(s->host->memory + c));
+    return true; })
+NATIVE(wgpuRenderPassEncoderBeginOcclusionQuery, "ii>", {
+    void* pass = S(0); NEED(pass);
+    P.wgpuRenderPassEncoderBeginOcclusionQuery((WGPURenderPassEncoder)pass, a.u32(1));
+    return true; })
+NATIVE(wgpuRenderPassEncoderEndOcclusionQuery, "i>", {
+    void* pass = S(0); NEED(pass);
+    P.wgpuRenderPassEncoderEndOcclusionQuery((WGPURenderPassEncoder)pass);
+    return true; })
+NATIVE(wgpuRenderPassEncoderExecuteBundles, "iii>", {
+    void* pass = S(0); NEED(pass);
+    uint32_t n = a.u32(1), list = a.u32(2);
+    wc_refresh_memory(s->host);
+    if (n > 4096 || (list & 3) || (uint64_t)list + (uint64_t)n * 4 > s->host->memory_size) return false;
+    WGPURenderBundle bundles[4096];
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t p; memcpy(&p, s->host->memory + list + i * 4, 4);
+        NEED(bundles[i] = (WGPURenderBundle)H(s, p));
+    }
+    P.wgpuRenderPassEncoderExecuteBundles((WGPURenderPassEncoder)pass, n, bundles);
+    return true; })
+NATIVE(wgpuRenderPassEncoderEnd, "i>", {
+    void* pass = S(0); NEED(pass);
+    P.wgpuRenderPassEncoderEnd((WGPURenderPassEncoder)pass);
+    return true; })
+NATIVE(wgpuComputePassEncoderSetPipeline, "ii>", {
+    void* pass = S(0); void* pipe = S(1); NEED(pass); NEED(pipe);
+    P.wgpuComputePassEncoderSetPipeline((WGPUComputePassEncoder)pass, (WGPUComputePipeline)pipe);
+    return true; })
+NATIVE(wgpuComputePassEncoderSetBindGroup, "iiiii>", {
+    void* pass = S(0); uint32_t gptr = a.u32(2); void* group = H(s, gptr); NEED(pass); if (gptr) NEED(group);
+    uint32_t count = a.u32(3), offs = a.u32(4);
+    const uint32_t* offsets = nullptr;
+    if (count) {
         wc_refresh_memory(s->host);
-        if (n > 4096 || (list & 3) || (uint64_t)list + (uint64_t)n * 4 > s->host->memory_size) return false;
-        WGPURenderBundle bundles[4096];
-        for (uint32_t i = 0; i < n; i++) {
-            uint32_t p; memcpy(&p, s->host->memory + list + i * 4, 4);
-            NEED(bundles[i] = (WGPURenderBundle)H(s, p));
-        }
-        P.wgpuRenderPassEncoderExecuteBundles((WGPURenderPassEncoder)pass, n, bundles);
-        return true; } },
-    { "wgpuRenderPassEncoderEnd", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); NEED(pass);
-        P.wgpuRenderPassEncoderEnd((WGPURenderPassEncoder)pass);
-        return true; } },
-    { "wgpuComputePassEncoderSetPipeline", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); void* pipe = S(1); NEED(pass); NEED(pipe);
-        P.wgpuComputePassEncoderSetPipeline((WGPUComputePassEncoder)pass, (WGPUComputePipeline)pipe);
-        return true; } },
-    { "wgpuComputePassEncoderSetBindGroup", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); uint32_t gptr = U32(a, 2); void* group = H(s, gptr); NEED(pass); if (gptr) NEED(group);
-        uint32_t count = U32(a, 3), offs = U32(a, 4);
-        const uint32_t* offsets = nullptr;
-        if (count) {
-            wc_refresh_memory(s->host);
-            if ((uint64_t)offs + (uint64_t)count * 4 > s->host->memory_size) return false;
-            offsets = (const uint32_t*)(s->host->memory + offs);
-        }
-        P.wgpuComputePassEncoderSetBindGroup((WGPUComputePassEncoder)pass, U32(a, 1), (WGPUBindGroup)group, count, offsets);
-        return true; } },
-    { "wgpuComputePassEncoderDispatchWorkgroups", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); NEED(pass);
-        P.wgpuComputePassEncoderDispatchWorkgroups((WGPUComputePassEncoder)pass, U32(a, 1), U32(a, 2), U32(a, 3));
-        return true; } },
-    { "wgpuComputePassEncoderDispatchWorkgroupsIndirect", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); void* buf = S(1); NEED(pass); NEED(buf);
-        P.wgpuComputePassEncoderDispatchWorkgroupsIndirect((WGPUComputePassEncoder)pass, (WGPUBuffer)buf, U64(a, 2));
-        return true; } },
-    { "wgpuComputePassEncoderEnd", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* pass = S(0); NEED(pass);
-        P.wgpuComputePassEncoderEnd((WGPUComputePassEncoder)pass);
-        return true; } },
-    { "wgpuQueueWriteBuffer", [](Session* s, const v8::FunctionCallbackInfo<v8::Value>& a) {
-        void* q = S(0); void* buf = S(1); NEED(q); NEED(buf);
-        uint32_t data = U32(a, 3), size = U32(a, 4);
-        wc_refresh_memory(s->host);
-        if ((uint64_t)data + size > s->host->memory_size) return false;
-        P.wgpuQueueWriteBuffer((WGPUQueue)q, (WGPUBuffer)buf, U64(a, 2), s->host->memory + data, size);
-        return true; } },
-};
+        if ((uint64_t)offs + (uint64_t)count * 4 > s->host->memory_size) return false;
+        offsets = (const uint32_t*)(s->host->memory + offs);
+    }
+    P.wgpuComputePassEncoderSetBindGroup((WGPUComputePassEncoder)pass, a.u32(1), (WGPUBindGroup)group, count, offsets);
+    return true; })
+NATIVE(wgpuComputePassEncoderDispatchWorkgroups, "iiii>", {
+    void* pass = S(0); NEED(pass);
+    P.wgpuComputePassEncoderDispatchWorkgroups((WGPUComputePassEncoder)pass, a.u32(1), a.u32(2), a.u32(3));
+    return true; })
+NATIVE(wgpuComputePassEncoderDispatchWorkgroupsIndirect, "iil>", {
+    void* pass = S(0); void* buf = S(1); NEED(pass); NEED(buf);
+    P.wgpuComputePassEncoderDispatchWorkgroupsIndirect((WGPUComputePassEncoder)pass, (WGPUBuffer)buf, a.u64(2));
+    return true; })
+NATIVE(wgpuComputePassEncoderEnd, "i>", {
+    void* pass = S(0); NEED(pass);
+    P.wgpuComputePassEncoderEnd((WGPUComputePassEncoder)pass);
+    return true; })
+NATIVE(wgpuQueueWriteBuffer, "iilii>", {
+    void* q = S(0); void* buf = S(1); NEED(q); NEED(buf);
+    uint32_t data = a.u32(3), size = a.u32(4);
+    wc_refresh_memory(s->host);
+    if ((uint64_t)data + size > s->host->memory_size) return false;
+    P.wgpuQueueWriteBuffer((WGPUQueue)q, (WGPUBuffer)buf, a.u64(2), s->host->memory + data, size);
+    return true; })
 #undef S
 #undef NEED
-constexpr int kNativeCount = (int)(sizeof kNatives / sizeof kNatives[0]);
+#undef NATIVE
 
-void native_cb(const v8::FunctionCallbackInfo<v8::Value>& a) {
+template <size_t N> struct Sig {
+    char s[N];
+    constexpr Sig(const char (&x)[N]) { for (size_t i = 0; i < N; i++) s[i] = x[i]; }
+    constexpr size_t nparams() const { size_t i = 0; while (s[i] != '>') i++; return i; }
+    constexpr bool wide() const { for (size_t i = 0; i < N; i++) if (s[i] == 'l') return true; return false; }
+};
+template <char C> struct CType;
+template <> struct CType<'i'> { using T = int32_t; };
+template <> struct CType<'f'> { using T = float; };
+template <> struct CType<'l'> { using T = int64_t; };
+
+template <class Nt>
+void slow_cb(const v8::FunctionCallbackInfo<v8::Value>& a) {
     auto* d = (CallData*)a.Data().As<v8::External>()->Value();
-    if (kNatives[d->index].body(d->s, a)) { d->s->native_calls++; return; }
+    if (Nt::run(d->s, SlowArgs{ a })) { d->s->native_calls++; wc_wgpu_native_calls_total++; return; }
     call_fallback(d->s, d->index, a);
 }
+template <class Nt, class... P>
+void fast_cb(v8::Local<v8::Value>, P... p, v8::FastApiCallbackOptions& o) {
+    auto* d = (CallData*)o.data.As<v8::External>()->Value();
+    FastArgs fa;
+    int k = 0;
+    (fa.put(k++, p), ...);
+    (void)k;
+    if (Nt::run(d->s, fa)) { d->s->native_calls++; wc_wgpu_native_calls_total++; return; }
+    if (!d->s->failed) d->s->failed = Nt::name;
+    d->s->failed_calls++;
+}
+template <class Nt, Sig S, size_t... I>
+const v8::CFunction* cfunc_of(std::index_sequence<I...>) {
+    static const v8::CFunction cf = v8::CFunction::Make(
+        &fast_cb<Nt, typename CType<S.s[I]>::T...>,
+        S.wide() ? v8::CFunctionInfo::Int64Representation::kBigInt : v8::CFunctionInfo::Int64Representation::kNumber);
+    return &cf;
+}
+template <class Nt>
+const v8::CFunction* cfunc() {
+    constexpr Sig sig(Nt::sig);
+    return cfunc_of<Nt, sig>(std::make_index_sequence<sig.nparams()>{});
+}
+
+struct Native { const char* name; v8::FunctionCallback slow; const v8::CFunction* (*fast)(); };
+#define E(nm) { N_##nm::name, &slow_cb<N_##nm>, &cfunc<N_##nm> }
+const Native kNatives[] = {
+    E(wgpuRenderPassEncoderSetPipeline), E(wgpuRenderPassEncoderSetBindGroup), E(wgpuRenderPassEncoderSetVertexBuffer),
+    E(wgpuRenderPassEncoderSetIndexBuffer), E(wgpuRenderPassEncoderDraw), E(wgpuRenderPassEncoderDrawIndexed),
+    E(wgpuRenderPassEncoderDrawIndirect), E(wgpuRenderPassEncoderDrawIndexedIndirect), E(wgpuRenderPassEncoderSetViewport),
+    E(wgpuRenderPassEncoderSetScissorRect), E(wgpuRenderPassEncoderSetStencilReference), E(wgpuRenderPassEncoderSetBlendConstant),
+    E(wgpuRenderPassEncoderBeginOcclusionQuery), E(wgpuRenderPassEncoderEndOcclusionQuery), E(wgpuRenderPassEncoderExecuteBundles),
+    E(wgpuRenderPassEncoderEnd), E(wgpuComputePassEncoderSetPipeline), E(wgpuComputePassEncoderSetBindGroup),
+    E(wgpuComputePassEncoderDispatchWorkgroups), E(wgpuComputePassEncoderDispatchWorkgroupsIndirect), E(wgpuComputePassEncoderEnd),
+    E(wgpuQueueWriteBuffer),
+};
+#undef E
+constexpr int kNativeCount = (int)(sizeof kNatives / sizeof kNatives[0]);
 
 void register_cb(const v8::FunctionCallbackInfo<v8::Value>& a) {
     auto* s = (Session*)a.Data().As<v8::External>()->Value();
     if (a.Length() < 2 || !a[1]->IsBigInt()) return;
-    uint32_t ptr = U32(a, 0);
+    uint32_t ptr = SlowArgs{ a }.u32(0);
     void* h = (void*)(uintptr_t)a[1].As<v8::BigInt>()->Uint64Value();
     if (ptr && h) s->handles[ptr] = h;
 }
 void forget_cb(const v8::FunctionCallbackInfo<v8::Value>& a) {
     auto* s = (Session*)a.Data().As<v8::External>()->Value();
-    if (a.Length() >= 1) s->handles.erase(U32(a, 0));
+    if (a.Length() >= 1) s->handles.erase(SlowArgs{ a }.u32(0));
 }
 
 }  // namespace
@@ -368,7 +449,11 @@ int wc_wgpu_native_install(wc_host_t* host, v8::Local<v8::Object> env, v8::Local
         v8::Local<v8::Value> glue;
         if (!wgpu_mod->Get(ctx(), key).ToLocal(&glue) || !glue->IsFunction()) continue;
         s->fallback[i].Reset(g_isolate, glue.As<v8::Function>());
-        auto fn = v8::Function::New(ctx(), native_cb, v8::External::New(g_isolate, &s->calls[i])).ToLocalChecked();
+        // the session's own template (its data is this session's CallData)
+        auto t = v8::FunctionTemplate::New(g_isolate, kNatives[i].slow, v8::External::New(g_isolate, &s->calls[i]),
+                                           v8::Local<v8::Signature>(), 0, v8::ConstructorBehavior::kThrow,
+                                           v8::SideEffectType::kHasSideEffect, kNatives[i].fast());
+        auto fn = t->GetFunction(ctx()).ToLocalChecked();
         env->Set(ctx(), key, fn).Check();
         wgpu_mod->Set(ctx(), key, fn).Check();
         n++;
@@ -391,6 +476,16 @@ void wc_wgpu_native_drop(wc_host_t* host) {
     g_sessions.erase(it);
 }
 
+// A fast native call that named an object with no native handle (it was
+// skipped: a fast call cannot hand it to the glue): that import's name, else
+// NULL. The host stops the cart with it after the frame.
+const char* wc_wgpu_native_failed(wc_host_t* host, uint64_t* calls) {
+    auto it = g_sessions.find(host);
+    if (it == g_sessions.end() || !it->second->failed) return nullptr;
+    if (calls) *calls = it->second->failed_calls;
+    return it->second->failed;
+}
+
 // For a host's performance log: calls served natively, and by the glue.
 extern "C" void wc_host_wgpu_native_stats(wc_host_t* host, uint64_t* native_calls, uint64_t* fallback_calls) {
     auto it = g_sessions.find(host);
@@ -406,5 +501,6 @@ v8::Local<v8::Value> wc_wgpu_native_table(wc_host_t*) { return v8::Undefined(g_i
 int wc_wgpu_native_install(wc_host_t*, v8::Local<v8::Object>, v8::Local<v8::Object>) { return 0; }
 void wc_wgpu_native_drop(wc_host_t*) {}
 extern "C" void wc_host_wgpu_native_stats(wc_host_t*, uint64_t* n, uint64_t* f) { *n = *f = 0; }
+const char* wc_wgpu_native_failed(wc_host_t*, uint64_t*) { return nullptr; }
 
 #endif

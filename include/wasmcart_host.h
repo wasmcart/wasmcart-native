@@ -385,7 +385,8 @@ void wc_host_run_frame(wc_host_t* host);
 
 // Frame profiling (a host's performance log, e.g. wasmcart-libretro's
 // wasmcart_perf_log option). Off by default; on, every GL import a cart calls
-// is timed and V8's garbage collections are counted, and wc_host_prof_take
+// is timed, wc_render and wc_host_run_frame are timed, WebGPU calls served
+// directly by Dawn are counted, V8's garbage collections are counted, and wc_host_prof_take
 // returns the totals since the last take and starts them again.
 typedef struct {
     double   gl_ms;            // time inside the cart's GL imports (the GL driver and the import glue)
@@ -395,6 +396,9 @@ typedef struct {
     double   gc_ms;            // V8 garbage collection (prologue to epilogue)
     uint32_t gc_count;
     double   heap_used_mb;     // V8 heap in use at the take
+    double   render_ms;        // the cart's wc_render (its code, its imports and the WebGPU glue)
+    double   frame_ms;         // all of wc_host_run_frame: wc_render and the host's work around it
+    uint64_t wgpu_calls;       // WebGPU imports served by calling Dawn directly
 } wc_host_prof_t;
 void wc_host_prof_enable(int on);
 void wc_host_prof_take(wc_host_prof_t* out);

@@ -68,6 +68,12 @@ struct v8_host_state {
     v8::Global<v8::Function> fn_initialize;
     v8::Global<v8::Function> fn_wc_set_seed;
     v8::Global<v8::Object> memory_obj;   // WebAssembly.Memory
+    // Its backing store, held so an import can find the memory without a V8
+    // call (wc_refresh_memory, from V8 fast API calls that must not touch the
+    // JS heap). A wasm memory grows in place (V8 reserves its whole range), so
+    // Data() stays put and ByteLength() follows a grow; refresh_memory takes
+    // the store again from the memory object should it ever change.
+    std::shared_ptr<v8::BackingStore> memory_store;
     v8::Global<v8::Object> jit;          // runtime code generation: createJitImports(...) + attach()
     v8::Global<v8::Object> actions;      // input actions: WC_ACTIONS_HOST_JS(...), kept across loads
 
@@ -101,6 +107,8 @@ extern "C" bool wc_wgpu_native_init(const char* dir);
 v8::Local<v8::Value> wc_wgpu_native_table(wc_host_t* host);
 int wc_wgpu_native_install(wc_host_t* host, v8::Local<v8::Object> env, v8::Local<v8::Object> wgpu_mod);
 void wc_wgpu_native_drop(wc_host_t* host);
+const char* wc_wgpu_native_failed(wc_host_t* host, uint64_t* calls);
+extern uint64_t wc_wgpu_native_calls_total;  // every host's, for the performance log
 
 v8::Local<v8::Context> ctx() {
     return g_setup->context();
@@ -114,6 +122,7 @@ static void refresh_memory(wc_host_t* host) {
     auto ab = wasm_mem->Buffer();
     host->memory = (uint8_t*)ab->Data();
     host->memory_size = (uint32_t)ab->ByteLength();
+    if (!state->memory_store || state->memory_store->Data() != ab->Data()) state->memory_store = ab->GetBackingStore();
 }
 
 // Seed the cart's RNG before wc_init. Without this every boot runs the cart's
@@ -832,6 +841,12 @@ static v8::Local<v8::Object> build_env_imports() {
 
 // Helpers for gl_imports.cpp to access V8 state
 extern "C" void wc_refresh_memory(wc_host_t* host) {
+    auto state = (v8_host_state*)host->v8_state;
+    if (state && state->memory_store) {
+        host->memory = (uint8_t*)state->memory_store->Data();
+        host->memory_size = (uint32_t)state->memory_store->ByteLength();
+        return;
+    }
     refresh_memory(host);
 }
 
@@ -2823,8 +2838,23 @@ static void deliver_wheel(wc_host_t* host) {
     wc_write_u32(host->memory, host->info.wheel_ptr + WC_WHEEL_DY, (uint32_t) host->wheel_dy);
 }
 
+// The performance log's frame times (wc_host_prof_take).
+extern "C" int wc_gl_prof_on;
+static double prof_render_ms = 0, prof_frame_ms = 0;
+static uint64_t prof_wgpu_seen = 0;
+static double prof_now_ms(void) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+struct ProfSpan {
+    double* sum;
+    double t0;
+    explicit ProfSpan(double* s) : sum(s), t0(wc_gl_prof_on ? prof_now_ms() : 0) {}
+    ~ProfSpan() { if (wc_gl_prof_on) *sum += prof_now_ms() - t0; }
+};
+
 extern "C" void wc_host_run_frame(wc_host_t* host) {
     if (!host->fn_wc_render || host->trapped) return;
+    ProfSpan frame_span(&prof_frame_ms);
 
     // Locker + Isolate::Scope held persistently. Only HandleScope + Context::Scope per frame.
     v8::HandleScope handle_scope(g_isolate);
@@ -2833,6 +2863,7 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     auto state = (v8_host_state*)host->v8_state;
     v8::TryCatch try_catch(g_isolate);
 
+    refresh_memory(host);     // the store the imports read (wc_refresh_memory), checked once a frame
     pump_node(host);          // let node's async work progress before the frame
     drain_js_peer_events(host); // move socket events into the peer records
     deliver_peers(host);        // then into the cart, at a known point
@@ -2882,8 +2913,11 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
         wgpu_call(host, "begin");
     }
 
-    auto result = state->fn_wc_render.Get(g_isolate)->Call(
-        ctx(), ctx()->Global(), 0, nullptr);
+    v8::MaybeLocal<v8::Value> result;
+    {
+        ProfSpan render_span(&prof_render_ms);
+        result = state->fn_wc_render.Get(g_isolate)->Call(ctx(), ctx()->Global(), 0, nullptr);
+    }
 
     if (result.IsEmpty() && try_catch.HasCaught()) {
         v8::String::Utf8Value err(g_isolate, try_catch.Exception());
@@ -2894,7 +2928,17 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
     }
 
     refresh_memory(host);
-    if (host->uses_wgpu) wgpu_call(host, "end");
+    if (host->uses_wgpu) {
+        wgpu_call(host, "end");
+        uint64_t n = 0;
+        if (const char* which = wc_wgpu_native_failed(host, &n)) {
+            snprintf(host->trap_reason, sizeof host->trap_reason,
+                     "%llu WebGPU call(s) (the first %s) named an object the host has no native handle for", (unsigned long long)n, which);
+            wc_log("wasmcart: wc_render trapped: %s\n", host->trap_reason);
+            host->trapped = true;
+            return;
+        }
+    }
 
     // A WebGPU cart changes size by reconfiguring its surface and writing the
     // new size into wc_info_t (SPEC.md, "Resolution changes", GPU carts): adopt
@@ -3194,9 +3238,6 @@ extern const char* wc_gl_prof_max_name;
 static double prof_gc_ms = 0, prof_gc_t0 = 0;
 static uint32_t prof_gc_count = 0;
 static bool prof_gc_hooked = false;
-static double prof_now_ms() {
-    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
-}
 static void prof_gc_begin(v8::Isolate*, v8::GCType, v8::GCCallbackFlags) { prof_gc_t0 = prof_now_ms(); }
 static void prof_gc_end(v8::Isolate*, v8::GCType, v8::GCCallbackFlags) {
     if (prof_gc_t0 > 0) prof_gc_ms += prof_now_ms() - prof_gc_t0;
@@ -3215,6 +3256,11 @@ extern "C" void wc_host_prof_enable(int on) {
 
 extern "C" void wc_host_prof_take(wc_host_prof_t* out) {
     if (!out) return;
+    out->render_ms = prof_render_ms;
+    out->frame_ms = prof_frame_ms;
+    prof_render_ms = prof_frame_ms = 0;
+    out->wgpu_calls = wc_wgpu_native_calls_total - prof_wgpu_seen;
+    prof_wgpu_seen = wc_wgpu_native_calls_total;
     out->gl_ms = wc_gl_prof_ms;
     out->gl_calls = wc_gl_prof_calls;
     out->gl_max_ms = wc_gl_prof_max_ms;

@@ -143,9 +143,10 @@ with that reason, and a cart that also imports GL runs on GL (which is how
 the libretro and Android builds behave today).
 
 The calls a frame makes most (a render or compute pass's state, draws and
-dispatches, and the queue's buffer writes) are C++ callbacks into Dawn's C
-API (`src/wgpu_imports.cpp`), as the GL imports are, on the objects the glue
-made (native-dawn's `objectHandle`); the rest go through the glue. Dawn's
+dispatches, and the queue's buffer writes) call Dawn's C API from C++
+(`src/wgpu_imports.cpp`), as the GL imports do, on the objects the glue
+made (native-dawn's `objectHandle`); the rest go through the glue. They are
+V8 fast API functions, as the GL imports are (below). Dawn's
 validation is off unless asked for (above). When the cart's canvas is the
 window's size, it draws straight into the window's texture; any other size is
 letterboxed with a copy.
@@ -405,8 +406,15 @@ freed at unmap; a payload is freed when the cart's handler returns.
 
 ### GL Import Bridge (gl_imports.cpp)
 
-~209 GLES3 functions registered as V8 FunctionCallbacks (the count is logged
-at startup: `GL imports registered (N functions, ...)`). Key non-obvious behaviors:
+~209 GLES3 functions (the count is logged at startup: `GL imports registered
+(N functions, ...)`). Each is a V8 function with two entry points sharing one
+body: a fast API function in the import's C types (`v8::CFunction`), which a
+cart's wasm calls directly when the signatures match (V8's wasm-to-fast-API
+wrapper: no JS values on the way), and a FunctionCallback for any other
+caller. A body that runs the cart's code (`glGetString`, `glMapBufferRange`
+and `glUnmapBuffer` allocate in cart memory) has only the callback. Imports
+find cart memory through its backing store (`wc_refresh_memory`), with no
+V8 call. Key non-obvious behaviors:
 
 **FBO Redirect**: All `glBindFramebuffer(GL_FRAMEBUFFER, 0)` calls are intercepted and redirected to a capture FBO. This lets the host blit the cart's output to the screen with letterboxing. `glClear` on the redirect FBO is suppressed after a cart blit to prevent wiping captured content.
 
@@ -418,16 +426,13 @@ at startup: `GL imports registered (N functions, ...)`). Key non-obvious behavio
 
 **Client-Side Vertex Arrays**: gl4es carts pass WASM memory offsets as "pointers" to `glVertexAttribPointer` with no VBO bound. The bridge tracks `GL_ARRAY_BUFFER` binding state and uploads client-side data to temp VBOs at draw time.
 
-### Performance: Native vs Node.js Host
+### Import call cost
 
-The Node.js host ([retroemu](https://github.com/monteslu/retroemu) +
-[native-gles](https://github.com/monteslu/native-gles)) currently beats the native
-host on some GL carts (~860 vs ~716 FPS for Skia Ganesh). Both use V8 for WASM and the same GPU for GL. The gap is in the GL call overhead:
-
-- **Node.js host**: GL calls go through N-API (native-gles addon) — one function pointer call per GL function, minimal marshaling.
-- **Native host**: GL calls go through V8 FunctionCallbacks — each call enters V8's callback machinery, extracts args from `v8::FunctionCallbackInfo`, converts types. This overhead multiplies across ~73 GL calls per frame (Ganesh) or ~193 GL calls in complex scenes.
-
-**Potential fix**: Register GL imports as [fast API calls](https://v8.dev/docs/embed) (`v8::CFunction`) instead of regular FunctionCallbacks. V8's fast API path bypasses the full callback machinery for simple functions with known signatures — could eliminate most of the per-call overhead.
+GL imports and the direct WebGPU imports are V8 fast API functions (above):
+the cart's wasm calls the C function directly. As FunctionCallbacks, each
+call entered V8's callback machinery and converted its arguments from JS
+values, which cost 0.3-0.8 ms a frame on cartwheel's 3D carts on a Ryzen AI
+9 HX 370 (wasmcart-libretro's performance log).
 
 ### Wayland vs X11
 

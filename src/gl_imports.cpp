@@ -5,6 +5,10 @@
 
 #include <chrono>
 #include "v8.h"
+#include "v8-fast-api-calls.h"
+#include <type_traits>
+#include <utility>
+#include <vector>
 extern "C" {
 #include "cart_host.h"
 #include <GLES3/gl3.h>
@@ -175,22 +179,108 @@ struct GLProfScope {
     }
 };
 
+// Each GL import has two entry points that share one body:
+//   _cb_glXxx    the V8 FunctionCallback (a JavaScript caller, or a call V8
+//                cannot make directly), which unpacks the arguments from JS
+//                values;
+//   gl_fast<...> a V8 fast API function (v8-fast-api-calls.h) with the wasm
+//                signature in C types. A cart's wasm import whose signature
+//                matches calls it directly (V8's kWasmToJSFastApi wrapper):
+//                no JS values, no FunctionCallbackInfo, about a tenth of the
+//                cost of the callback path per call.
+// A fast function must not allocate on the JS heap or run JS, so a body that
+// does (glGetString, glMapBufferRange: memory from the cart's wc_alloc) is
+// registered without one (GL_E_SLOW). wc_refresh_memory reads the cart
+// memory's backing store, no V8 call.
+struct GLSlowArgs {
+    const v8::FunctionCallbackInfo<v8::Value>& a;
+    v8::Local<v8::Value> at(int n) const { return a[n]; }
+    uint32_t u32(int n) const {
+        v8::Local<v8::Value> v = a[n];
+        if (v->IsInt32()) return (uint32_t)v.As<v8::Int32>()->Value();
+        return v->Uint32Value(ctx()).FromMaybe(0);
+    }
+    int32_t i32(int n) const {
+        v8::Local<v8::Value> v = a[n];
+        if (v->IsInt32()) return v.As<v8::Int32>()->Value();
+        return v->Int32Value(ctx()).FromMaybe(0);
+    }
+    float f32(int n) const {
+        v8::Local<v8::Value> v = a[n];
+        if (v->IsNumber()) return (float)v.As<v8::Number>()->Value();
+        return (float)v->NumberValue(ctx()).FromMaybe(0);
+    }
+    int64_t i64(int n) const {  // a wasm i64 reaches JS as a BigInt
+        v8::Local<v8::Value> v = a[n];
+        if (v->IsBigInt()) return v.As<v8::BigInt>()->Int64Value();
+        return (int64_t)v->IntegerValue(ctx()).FromMaybe(0);
+    }
+    void ret(int32_t r) const { a.GetReturnValue().Set(r); }
+};
+struct GLFastArgs {
+    union { int32_t i; uint32_t u; float f; int64_t l; } v[12];
+    int32_t r = 0;
+    uint32_t u32(int n) const { return v[n].u; }
+    int32_t i32(int n) const { return v[n].i; }
+    float f32(int n) const { return v[n].f; }
+    int64_t i64(int n) const { return v[n].l; }
+    void ret(int32_t x) { r = x; }
+    void put(int n, int32_t x) { v[n].l = 0; v[n].i = x; }
+    void put(int n, float x) { v[n].l = 0; v[n].f = x; }
+    void put(int n, int64_t x) { v[n].l = x; }
+};
+
 #define GL_REG(name, nparams, nresults, body) \
-    static void _cb_##name(const v8::FunctionCallbackInfo<v8::Value>& _args) { \
-        GLProfScope _prof(#name); \
-        v8::Local<v8::Context> _ctx = ctx(); \
-        (void)_ctx; \
+    static const char _nm_##name[] = #name; \
+    template <class GLArgs> static inline void _body_##name(GLArgs& _args) { body; } \
+    static void _cb_##name(const v8::FunctionCallbackInfo<v8::Value>& _info) { \
+        GLProfScope _prof(_nm_##name); \
         wc_refresh_memory(_host); \
-        body; \
+        GLSlowArgs _a{_info}; \
+        _body_##name(_a); \
     }
 
-#define A_I32(n) (_args[n]->Int32Value(_ctx).FromJust())
-#define A_U32(n) (_args[n]->Uint32Value(_ctx).FromJust())
-#define A_F32(n) ((float)_args[n]->NumberValue(_ctx).FromJust())
-#define A_F64(n) (_args[n]->NumberValue(_ctx).FromJust())
-#define A_I64(n) ((int64_t)_args[n]->IntegerValue(_ctx).FromJust())
-#define R_I32(v) _args.GetReturnValue().Set((int32_t)(v))
-#define R_F32(v) _args.GetReturnValue().Set((double)(v))
+#define A_I32(n) (_args.i32(n))
+#define A_U32(n) (_args.u32(n))
+#define A_F32(n) (_args.f32(n))
+#define A_I64(n) (_args.i64(n))
+#define R_I32(v) _args.ret((int32_t)(v))
+
+// The fast function for a body, from the import's signature string ("iif>i":
+// i32, i32, f32 parameters, an i32 result; l = i64).
+template <size_t N> struct GLSig {
+    char s[N];
+    constexpr GLSig(const char (&x)[N]) { for (size_t i = 0; i < N; i++) s[i] = x[i]; }
+    constexpr size_t nparams() const { size_t i = 0; while (s[i] != '>') i++; return i; }
+    constexpr bool returns() const { return s[nparams() + 1] == 'i'; }
+    constexpr bool wide() const { for (size_t i = 0; i < N; i++) if (s[i] == 'l') return true; return false; }
+};
+template <char C> struct GLCType;
+template <> struct GLCType<'i'> { using T = int32_t; };
+template <> struct GLCType<'f'> { using T = float; };
+template <> struct GLCType<'l'> { using T = int64_t; };
+
+template <void (*Body)(GLFastArgs&), const char* Name, class R, class... P>
+static R gl_fast(v8::Local<v8::Value>, P... p) {
+    GLProfScope _prof(Name);
+    wc_refresh_memory(_host);
+    GLFastArgs a;
+    int k = 0;
+    (a.put(k++, p), ...);
+    (void)k;
+    Body(a);
+    if constexpr (!std::is_void_v<R>) return (R)a.r;
+}
+template <GLSig S, void (*Body)(GLFastArgs&), const char* Name, size_t... I>
+static const v8::CFunction* gl_cfunc_of(std::index_sequence<I...>) {
+    using R = std::conditional_t<S.returns(), int32_t, void>;
+    static const v8::CFunction cf = v8::CFunction::Make(
+        &gl_fast<Body, Name, R, typename GLCType<S.s[I]>::T...>,
+        S.wide() ? v8::CFunctionInfo::Int64Representation::kBigInt : v8::CFunctionInfo::Int64Representation::kNumber);
+    return &cf;
+}
+template <GLSig S, void (*Body)(GLFastArgs&), const char* Name>
+static const v8::CFunction* gl_cfunc() { return gl_cfunc_of<S, Body, Name>(std::make_index_sequence<S.nparams()>{}); }
 
 // ─── State ─────────────────────────────────────────────────────────────────
 
@@ -992,13 +1082,16 @@ typedef void (*v8_gl_callback_t)(const v8::FunctionCallbackInfo<v8::Value>&);
 typedef struct {
     const char* name;
     v8_gl_callback_t cb;
-    const char* sig; // kept for reference, not used in V8 registration
+    const char* sig;                    // wasm signature: "iif>i" (i32 i32 f32 -> i32; l = i64)
+    const v8::CFunction* (*fast)(void); // the fast API function, or NULL (GL_E_SLOW)
 } gl_import_entry_t;
 
 
 // Signature format: "iiff>i" means 2 i32 params, 2 f32 params, returns i32
 // "iiii>" means 4 i32 params, void return
-#define GL_E(name, sig_str) { #name, _cb_##name, sig_str }
+#define GL_E(name, sig_str) { #name, _cb_##name, sig_str, &gl_cfunc<sig_str, &_body_##name<GLFastArgs>, _nm_##name> }
+// a body that allocates in the cart (wc_cart_alloc / wc_cart_free run the cart's code): callback only
+#define GL_E_SLOW(name, sig_str) { #name, _cb_##name, sig_str, nullptr }
 
 static const gl_import_entry_t gl_table[] = {
     // State
@@ -1006,7 +1099,7 @@ static const gl_import_entry_t gl_table[] = {
     GL_E(glFinish, ">"), GL_E(glFlush, ">"), GL_E(glHint, "ii>"),
     GL_E(glPixelStorei, "ii>"), GL_E(glIsEnabled, "i>i"),
     GL_E(glGetIntegerv, "ii>"), GL_E(glGetFloatv, "ii>"),
-    GL_E(glGetBooleanv, "ii>"), GL_E(glGetString, "i>i"),
+    GL_E(glGetBooleanv, "ii>"), GL_E_SLOW(glGetString, "i>i"),
     GL_E(glGetInternalformativ, "iiiii>"),
     // Viewport/clear
     GL_E(glViewport, "iiii>"), GL_E(glScissor, "iiii>"), GL_E(glClear, "i>"),
@@ -1074,7 +1167,7 @@ static const gl_import_entry_t gl_table[] = {
     GL_E(glDrawBuffers, "ii>"), GL_E(glReadBuffer, "i>"),
     GL_E(glClearBufferfv, "iii>"),
     // GLES3 functions needed by Godot
-    GL_E(glGetStringi, "ii>i"), GL_E(glGetInteger64v, "ii>"),
+    GL_E_SLOW(glGetStringi, "ii>i"), GL_E(glGetInteger64v, "ii>"),
     GL_E(glBindBufferBase, "iii>"), GL_E(glBindBufferRange, "iiiii>"),
     GL_E(glGetUniformBlockIndex, "ii>i"), GL_E(glUniformBlockBinding, "iii>"),
     GL_E(glGetActiveUniformBlockiv, "iiii>"), GL_E(glGetActiveUniformsiv, "iiiii>"),
@@ -1106,7 +1199,7 @@ static const gl_import_entry_t gl_table[] = {
     GL_E(glFenceSync, "ii>i"), GL_E(glDeleteSync, "i>"),
     GL_E(glClientWaitSync, "iil>i"),  // i32, i32, i64 timeout, result i32
     // Buffer mapping
-    GL_E(glMapBufferRange, "iiii>i"), GL_E(glUnmapBuffer, "i>i"),
+    GL_E_SLOW(glMapBufferRange, "iiii>i"), GL_E_SLOW(glUnmapBuffer, "i>i"),
     // Extra attribs/params
     GL_E(glVertexAttrib4fv, "ii>"), GL_E(glTexParameteriv, "iii>"),
     // GLES 3.1+ / Skia Ganesh
@@ -1143,7 +1236,7 @@ static const gl_import_entry_t gl_table[] = {
     // Map buffer OES
     GL_E(glMapBufferOES, "ii>i"),
     // End
-    { NULL, NULL, NULL }
+    { NULL, NULL, NULL, NULL }
 };
 
 // ─── Registration ─────────────────────────────────────────────────────────
@@ -1505,9 +1598,24 @@ extern "C" void wc_gl_build_v8_imports(v8::Isolate* isolate, v8::Local<v8::Conte
     _glstring_cache.clear();
     _gl_mappings.clear();
 
+    // one template per import for the isolate's life (a template is never
+    // collected, so a cart loaded again reuses them)
+    static std::vector<v8::Global<v8::FunctionTemplate>> templates;
+    static v8::Isolate* templates_isolate = nullptr;
+    if (templates_isolate != isolate) {
+        for (auto& t : templates) t.Reset();
+        templates.clear();
+        templates_isolate = isolate;
+    }
     int idx = 0;
     for (const gl_import_entry_t* e = gl_table; e->name; e++, idx++) {
-        auto fn = v8::Function::New(context, e->cb).ToLocalChecked();
+        if ((size_t)idx >= templates.size()) {
+            auto t = v8::FunctionTemplate::New(isolate, e->cb, v8::Local<v8::Value>(), v8::Local<v8::Signature>(), 0,
+                                               v8::ConstructorBehavior::kThrow, v8::SideEffectType::kHasSideEffect,
+                                               e->fast ? e->fast() : nullptr);
+            templates.emplace_back(isolate, t);
+        }
+        auto fn = templates[idx].Get(isolate)->GetFunction(context).ToLocalChecked();
         auto name = v8::String::NewFromUtf8(isolate, e->name).ToLocalChecked();
         gl_obj->Set(context, name, fn).Check();
         env_obj->Set(context, name, fn).Check();
