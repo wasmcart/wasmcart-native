@@ -62,7 +62,7 @@ static void print_usage(const char* argv0) {
     fprintf(stderr, "  --fixed-step MS Host clock advances exactly MS per frame (deterministic tests;\n");
     fprintf(stderr, "                  the run starts with no save and writes none)\n");
     fprintf(stderr, "  --shot N FILE   Save frame N of a GL or WebGPU cart as a PPM (tests)\n");
-    fprintf(stderr, "  --debug-dump N FILE  After frame N, write the cart's debug state as JSON (tests)\n");
+    fprintf(stderr, "  --debug-dump N FILE  After frame N, write the cart's debug state as JSON (tests; repeatable)\n");
     fprintf(stderr, "  --debug-cmd N TEXT   Before frame N, post TEXT to a cartwheel-style dbg.cmd mailbox;\n");
     fprintf(stderr, "                       replies (dbg.reply) print to stderr (repeatable)\n");
 }
@@ -105,17 +105,29 @@ static int memory_watchdog(void* unused) {
 
 // ─── Controller management ─────────────────────────────────────────────────
 
+// SDL reports a controller present at start twice: in the device list read
+// after init, and as an SDL_CONTROLLERDEVICEADDED event its init queued.
+// Opening both put one controller in two pad slots (the cart saw pad 0 again
+// as pad 1, and a further controller found the slots full), so a device
+// already open is skipped. The slot is the controller's SDL player index when
+// it has a free one (the XInput slot, the index SDL handed out at connect), so
+// pads that come back in another order keep their players; otherwise the
+// first free slot.
 static void open_controller(int device_index) {
     if (!SDL_IsGameController(device_index)) return;
-    for (int i = 0; i < MAX_CONTROLLERS; i++) {
-        if (!controllers[i]) {
-            controllers[i] = SDL_GameControllerOpen(device_index);
-            if (controllers[i]) {
-                fprintf(stderr, "wasmcart: controller %d connected: %s\n",
-                    i, SDL_GameControllerName(controllers[i]));
-            }
-            return;
+    SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(device_index);
+    for (int i = 0; i < MAX_CONTROLLERS; i++)
+        if (controllers[i] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controllers[i])) == id) return;
+    int want = SDL_JoystickGetDevicePlayerIndex(device_index);
+    for (int k = -1; k < MAX_CONTROLLERS; k++) {
+        int i = k < 0 ? want : k;
+        if (i < 0 || i >= MAX_CONTROLLERS || controllers[i]) continue;
+        controllers[i] = SDL_GameControllerOpen(device_index);
+        if (controllers[i]) {
+            fprintf(stderr, "wasmcart: controller %d connected: %s\n",
+                i, SDL_GameControllerName(controllers[i]));
         }
+        return;
     }
 }
 
@@ -467,8 +479,10 @@ int main(int argc, char* argv[]) {
     double fixed_step = 0.0; /* --fixed-step MS: time_ms = frame * MS (tests) */
     uint32_t pref_width = 0;
     uint32_t pref_height = 0;
-    long dump_frame = -1;    /* --debug-dump N FILE */
-    const char* dump_path = NULL;
+    enum { MAX_DUMPS = 16 };  /* --debug-dump N FILE, repeatable (a test reads the state at several frames) */
+    long dump_frame[MAX_DUMPS];
+    const char* dump_path[MAX_DUMPS];
+    int dump_count = 0;
     enum { MAX_DBG_CMDS = 64 };
     long dbg_cmd_frame[MAX_DBG_CMDS];
     const char* dbg_cmd_text[MAX_DBG_CMDS];
@@ -513,8 +527,9 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (strcmp(argv[i], "--debug-dump") == 0 && i + 2 < argc) {
-            dump_frame = atol(argv[++i]);
-            dump_path = argv[++i];
+            if (dump_count == MAX_DUMPS) { fprintf(stderr, "wasmcart: too many --debug-dump\n"); return 1; }
+            dump_frame[dump_count] = atol(argv[++i]);
+            dump_path[dump_count++] = argv[++i];
         }
         else if (strcmp(argv[i], "--debug-cmd") == 0 && i + 2 < argc) {
             if (dbg_cmd_count == MAX_DBG_CMDS) { fprintf(stderr, "wasmcart: too many --debug-cmd\n"); return 1; }
@@ -1033,7 +1048,8 @@ int main(int argc, char* argv[]) {
             static uint32_t reply_seq = 0;
             dbg_poll_reply(host, &reply_seq);
         }
-        if (dump_path && (long)frame_count == dump_frame) dbg_dump(host, dump_path);
+        for (int d = 0; d < dump_count; d++)
+            if ((long)frame_count == dump_frame[d]) dbg_dump(host, dump_path[d]);
 
         // After first frame: cart may have resized (Godot reads host_info and reconfigures)
         // Resize redirect FBO to match actual render dimensions

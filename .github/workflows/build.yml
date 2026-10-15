@@ -97,6 +97,15 @@ jobs:
           sh test/thread_death_test.sh build/wasmcart-run
       - name: WebGPU window test
         run: xvfb-run -a -s "-screen 0 640x480x24" sh test/wgpu_window_test.sh build/wasmcart-run
+      # four virtual controllers (uinput) through SDL into the cart's pads
+      - name: Pads test
+        run: |
+          sudo modprobe uinput
+          printf '%s\n' 'KERNEL=="uinput", MODE="0666"' 'SUBSYSTEM=="input", MODE="0666"' | sudo tee /etc/udev/rules.d/99-wasmcart-test-pads.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger
+          sudo chmod 0666 /dev/uinput
+          sh test/pads_test.sh build/wasmcart-run
       - name: Package
         run: |
           strip build/wasmcart-run || true   # already stripped in Smoke test
@@ -176,6 +185,15 @@ jobs:
           sh test/thread_death_test.sh build/wasmcart-run
       - name: WebGPU window test
         run: xvfb-run -a -s "-screen 0 640x480x24" sh test/wgpu_window_test.sh build/wasmcart-run
+      # four virtual controllers (uinput) through SDL into the cart's pads
+      - name: Pads test
+        run: |
+          sudo modprobe uinput
+          printf '%s\n' 'KERNEL=="uinput", MODE="0666"' 'SUBSYSTEM=="input", MODE="0666"' | sudo tee /etc/udev/rules.d/99-wasmcart-test-pads.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger
+          sudo chmod 0666 /dev/uinput
+          sh test/pads_test.sh build/wasmcart-run
       - name: Package
         run: |
           strip build/wasmcart-run || true   # already stripped in Smoke test

@@ -224,8 +224,11 @@ wasmcart-run (75MB, statically linked)
 
 - **Gamepad**: SDL2 GameController API with 2,182 built-in controller mappings
 - **Keyboard**: Arrow keys / WASD / Z / X mapped to gamepad for pad-only carts
-- **4 players**: Up to 4 controllers supported simultaneously
-- **Hot-plug**: Controllers can be connected/disconnected during play
+- **4 players**: Up to 4 controllers supported simultaneously, each in its own
+  pad slot (pad N is player N + 1)
+- **Hot-plug**: Controllers can be connected/disconnected during play; one that
+  goes away leaves the others in their slots, and a new one takes the first
+  free slot. `test/pads_test.sh` checks it with virtual controllers (uinput)
 - **Rumble**: `wc_pad_rumble` routed to SDL2's haptics, with the ABI's clamping
   applied once in the host library so every embedder behaves the same
 - **Text input**: `wc_on_text` fed from `SDL_TEXTINPUT`, so a cart receives
