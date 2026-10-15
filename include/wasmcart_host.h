@@ -458,6 +458,10 @@ void wc_host_exit_v8(void);
 // Readback — call after wc_host_run_frame()
 const uint8_t*  wc_host_get_framebuffer(wc_host_t* host, uint32_t* width, uint32_t* height);
 const void*     wc_host_get_audio(wc_host_t* host, uint32_t* num_frames, bool* is_f32);
+// The same frames as interleaved stereo int16 in one pass from the cart's
+// ring (a float ring clamped to [-1, 1] and scaled by 32767), for a host
+// whose output takes int16 (libretro's audio_batch). Valid until the next call.
+const int16_t*  wc_host_get_audio_s16(wc_host_t* host, uint32_t* num_frames);
 uint8_t*        wc_host_get_save_data(wc_host_t* host, uint32_t* size);
 
 // GL carts

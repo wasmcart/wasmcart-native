@@ -107,6 +107,7 @@ extern "C" bool wc_wgpu_native_init(const char* dir);
 v8::Local<v8::Value> wc_wgpu_native_table(wc_host_t* host);
 int wc_wgpu_native_install(wc_host_t* host, v8::Local<v8::Object> env, v8::Local<v8::Object> wgpu_mod);
 void wc_wgpu_native_drop(wc_host_t* host);
+void wc_wgpu_native_attach(wc_host_t* host, v8::Local<v8::Object> exports);
 const char* wc_wgpu_native_failed(wc_host_t* host, uint64_t* calls);
 extern uint64_t wc_wgpu_native_calls_total;  // every host's, for the performance log
 
@@ -2071,6 +2072,7 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
             return -1;
         }
     }
+    if (host->uses_wgpu) wc_wgpu_native_attach(host, exports);
 
     // Functions
     auto get_fn = [&](const char* name) -> v8::Local<v8::Function> {
@@ -2887,30 +2889,32 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
             }
         }
     }
-    // The host's WebGPU device lost: the cart cannot continue on it, so it is
-    // not run again; the player reads wc_host_gpu_lost and tells the user.
-    if (host->uses_wgpu && !host->gpu_lost) {
-        auto why = wgpu_call(host, "lost");
-        if (why->IsString()) {
-            v8::String::Utf8Value w(g_isolate, why);
-            host->gpu_lost = true;
-            snprintf(host->gpu_lost_msg, sizeof host->gpu_lost_msg, "%s", *w);
-        }
-    }
+    // One bridge call before the frame (frameBegin): the host's WebGPU device
+    // lost ({ lost }: the cart cannot continue on it, so it is not run again;
+    // the player reads wc_host_gpu_lost and tells the user), or an error a
+    // WebGPU callback kept ({ fatal }: one that could not get cart memory ran
+    // inside Node's event loop, where a throw reaches no caller), else the
+    // frame begins (undefined).
     if (host->gpu_lost) return;
     if (host->uses_wgpu) {
-        // A WebGPU callback that could not get cart memory (no wc_alloc, or it
-        // failed) ran inside Node's event loop, where a throw reaches no
-        // caller; the glue kept the error, and it stops the cart here.
-        v8::Local<v8::Value> fatal = wgpu_call(host, "fatal");
-        if (fatal->IsString()) {
-            v8::String::Utf8Value msg(g_isolate, fatal);
-            wc_log("wasmcart: wc_render trapped: %s\n", *msg);
-            snprintf(host->trap_reason, sizeof host->trap_reason, "%s", *msg ? *msg : "WebGPU error");
-            host->trapped = true;
-            return;
+        auto r = wgpu_call(host, "frameBegin");
+        if (r->IsObject()) {
+            auto o = r.As<v8::Object>();
+            v8::Local<v8::Value> lost, fatal;
+            if (o->Get(ctx(), v8str("lost")).ToLocal(&lost) && lost->IsString()) {
+                v8::String::Utf8Value w(g_isolate, lost);
+                host->gpu_lost = true;
+                snprintf(host->gpu_lost_msg, sizeof host->gpu_lost_msg, "%s", *w);
+                return;
+            }
+            if (o->Get(ctx(), v8str("fatal")).ToLocal(&fatal) && fatal->IsString()) {
+                v8::String::Utf8Value msg(g_isolate, fatal);
+                wc_log("wasmcart: wc_render trapped: %s\n", *msg);
+                snprintf(host->trap_reason, sizeof host->trap_reason, "%s", *msg ? *msg : "WebGPU error");
+                host->trapped = true;
+                return;
+            }
         }
-        wgpu_call(host, "begin");
     }
 
     v8::MaybeLocal<v8::Value> result;
@@ -2980,23 +2984,14 @@ extern "C" const uint8_t* wc_host_get_framebuffer(wc_host_t* host, uint32_t* wid
     return host->memory + host->info.fb_ptr;
 }
 
-static uint8_t* _audio_copy_buf = NULL;
-static uint32_t _audio_copy_cap = 0;
-
-extern "C" const void* wc_host_get_audio(wc_host_t* host, uint32_t* num_frames, bool* is_f32) {
-    if (!host->memory || !host->info.audio_ptr || !host->info.audio_cap) {
-        *num_frames = 0; *is_f32 = false;
-        return NULL;
-    }
-
-    *is_f32 = (host->info.flags & WC_FLAG_AUDIO_F32) != 0;
-
+// The frames written since the last read: the ring's [read, write) span,
+// as a start index and a count (0 when there are none). Advances the cursor.
+static uint32_t audio_span(wc_host_t* host, uint32_t* start) {
+    if (!host->memory || !host->info.audio_ptr || !host->info.audio_cap) return 0;
     uint32_t write_cursor = wc_read_u32(host->memory, host->info.audio_write_ptr);
     uint32_t read_cursor = host->audio_read_cursor;
     uint32_t cap = host->info.audio_cap;
-
-    if (write_cursor == read_cursor) { *num_frames = 0; return NULL; }
-
+    if (write_cursor == read_cursor) return 0;
     // The cart's cursor may run free (wc_pcm_mixer: indices are cursor % cap)
     // or wrap at cap. A cursor that moved backwards past a wrap is neither: a
     // save state was written back, so resync instead of reading ~2^32 frames.
@@ -3007,50 +3002,68 @@ extern "C" const void* wc_host_get_audio(wc_host_t* host, uint32_t* num_frames, 
         available = cap - read_cursor + write_cursor;
     else {
         host->audio_read_cursor = write_cursor;
-        *num_frames = 0;
-        return NULL;
+        return 0;
     }
-
-    if (available == 0) { *num_frames = 0; return NULL; }
     // The ring holds at most cap frames; anything older was overwritten.
     if (available > cap) {
         read_cursor += available - cap;
         available = cap;
     }
-
-    uint32_t needed = available * 2;
-
-    if (*is_f32) {
-        uint32_t needed_bytes = needed * sizeof(float);
-        if (_audio_copy_cap < needed_bytes) {
-            _audio_copy_buf = (uint8_t*)realloc(_audio_copy_buf, needed_bytes);
-            _audio_copy_cap = needed_bytes;
-        }
-        float* out = (float*)_audio_copy_buf;
-        const float* ring_f32 = (const float*)(host->memory + host->info.audio_ptr);
-        for (uint32_t i = 0; i < available; i++) {
-            uint32_t ring_idx = ((read_cursor + i) % cap) * 2;
-            out[i * 2]     = ring_f32[ring_idx];
-            out[i * 2 + 1] = ring_f32[ring_idx + 1];
-        }
-    } else {
-        uint32_t needed_bytes = needed * sizeof(int16_t);
-        if (_audio_copy_cap < needed_bytes) {
-            _audio_copy_buf = (uint8_t*)realloc(_audio_copy_buf, needed_bytes);
-            _audio_copy_cap = needed_bytes;
-        }
-        int16_t* out = (int16_t*)_audio_copy_buf;
-        const int16_t* ring_i16 = (const int16_t*)(host->memory + host->info.audio_ptr);
-        for (uint32_t i = 0; i < available; i++) {
-            uint32_t ring_idx = ((read_cursor + i) % cap) * 2;
-            out[i * 2]     = ring_i16[ring_idx];
-            out[i * 2 + 1] = ring_i16[ring_idx + 1];
-        }
-    }
-
     host->audio_read_cursor = write_cursor;
-    *num_frames = available;
+    *start = read_cursor % cap;
+    return available;
+}
+
+static uint8_t* _audio_copy_buf = NULL;
+static uint32_t _audio_copy_cap = 0;
+static void* audio_buf(uint32_t bytes) {
+    if (_audio_copy_cap < bytes) {
+        _audio_copy_buf = (uint8_t*)realloc(_audio_copy_buf, bytes);
+        _audio_copy_cap = bytes;
+    }
     return _audio_copy_buf;
+}
+
+// The ring in up to two contiguous runs (before and after the wrap), each
+// handed to fn(ring_frame_index, out_frame_index, count).
+template <class F> static void audio_runs(uint32_t start, uint32_t n, uint32_t cap, F fn) {
+    uint32_t first = cap - start < n ? cap - start : n;
+    fn(start, 0, first);
+    if (n > first) fn(0, first, n - first);
+}
+
+extern "C" const void* wc_host_get_audio(wc_host_t* host, uint32_t* num_frames, bool* is_f32) {
+    *is_f32 = (host->info.flags & WC_FLAG_AUDIO_F32) != 0;
+    uint32_t start = 0, n = audio_span(host, &start);
+    *num_frames = n;
+    if (!n) return NULL;
+    size_t frame_bytes = *is_f32 ? 2 * sizeof(float) : 2 * sizeof(int16_t);
+    uint8_t* out = (uint8_t*)audio_buf((uint32_t)(n * frame_bytes));
+    const uint8_t* ring = host->memory + host->info.audio_ptr;
+    audio_runs(start, n, host->info.audio_cap, [&](uint32_t r, uint32_t o, uint32_t c) {
+        memcpy(out + o * frame_bytes, ring + r * frame_bytes, c * frame_bytes);
+    });
+    return out;
+}
+
+extern "C" const int16_t* wc_host_get_audio_s16(wc_host_t* host, uint32_t* num_frames) {
+    bool f32 = (host->info.flags & WC_FLAG_AUDIO_F32) != 0;
+    uint32_t start = 0, n = audio_span(host, &start);
+    *num_frames = n;
+    if (!n) return NULL;
+    int16_t* out = (int16_t*)audio_buf(n * 2 * sizeof(int16_t));
+    const uint8_t* ring = host->memory + host->info.audio_ptr;
+    audio_runs(start, n, host->info.audio_cap, [&](uint32_t r, uint32_t o, uint32_t c) {
+        if (!f32) { memcpy(out + o * 2, ring + r * 4, c * 4); return; }
+        const float* src = (const float*)(ring + (size_t)r * 8);
+        int16_t* dst = out + o * 2;
+        for (uint32_t i = 0; i < c * 2; i++) {
+            float v = src[i];
+            v = v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v;
+            dst[i] = (int16_t)(v * 32767.0f);
+        }
+    });
+    return out;
 }
 
 extern "C" uint8_t* wc_host_get_save_data(wc_host_t* host, uint32_t* size) {
