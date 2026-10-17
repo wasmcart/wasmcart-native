@@ -37,6 +37,9 @@ Environment:
                          run dual carts on GL)
   WASMCART_WGPU_DIR=DIR  Where the WebGPU support files are (default: wgpu/
                          beside the executable)
+  WASMCART_NO_PREFETCH=1 Act as a host built before asset prefetch: the
+                         wc_asset_prefetch imports are stubbed and the flag
+                         is not written (the tests' control)
   WASMCART_WGPU_POWER=low-power|high-performance
                          Which GPU WebGPU carts get on a two-GPU machine
                          (low-power = integrated); the choice is logged
@@ -279,7 +282,25 @@ model as the JS host (`CartHost.js` + `cartWorker.js`).
 A thread has the main thread's import table: WASI (`fd_write` to stdout/stderr,
 clocks, `poll_oneoff` sleeps, `sched_yield`, ...), `wc_log` and asset loading
 work everywhere; GL, WebGPU and the other `wc_*` imports are main-thread only and throw if
-a thread calls them. A cart that imports `thread-spawn` without exporting
+a thread calls them (`wc_asset_prefetch` answers `-3`, refused, and its cancel
+is a no-op: a thread reads the archive as before).
+
+## Asset prefetch
+
+wasmcart SPEC.md, "Asset prefetch" (additive to ABI v4): the host writes
+`WC_HOST_FLAG_ASSET_PREFETCH` (`0x04`) into `wc_host_info_t.flags`, and a cart
+that sees it may call `wc_asset_prefetch(path, len, priority)` for an asset it
+will read soon. The archive entry is extracted on libuv's threadpool (one
+`uv_queue_work` job with a ZIP reader of its own) into a buffer the host keeps;
+the same call polls the state, which becomes `READY` (1) between frames, and
+`wc_asset_size` / `wc_load_asset` of that path then answer from the copy with
+no archive read and no inflate. A whole read drops the copy;
+`wc_asset_prefetch_cancel` drops it earlier. Up to 256 paths pending or ready,
+4 extracting at once, 512 MiB held; beyond that a call answers `-3` (refused,
+ask again later). A path the archive lacks answers `-1`, a failed extract `-2`.
+A cart that never calls it is untouched, and a cart built against the imports
+still loads on an older build of this player (the stub answers 0, the flag is
+clear, and the cart reads synchronously). A cart that imports `thread-spawn` without exporting
 `wasi_thread_start` (or the reverse) is refused. Threads are terminated when the
 host is destroyed. A thread that dies (it traps, or its worker fails) stops the
 cart at its next frame with an error naming the thread: the cart's pool would
@@ -366,6 +387,8 @@ sh test/actions_test.sh build/wasmcart-run   # input actions: declarations, keyb
 ./host_threads_test ../wasmcart/test/fixtures/hostthreads.wasc ../wasmcart/test/fixtures/hostthreads_legacy.wasc
                               # hardware_threads written only for a cart with WC_FLAG_HOST_THREADS
 sh test/wgpu_test.sh          # WebGPU carts (needs a build with WebGPU support)
+sh test/prefetch_test.sh      # asset prefetch: READY across frames, reads served from
+                              # the copy, cancel; the control is an older host (no flag)
 sh test/alloc_test.sh         # GL strings/mappings in the cart's wc_alloc blocks
 ./alloc_payload_test test/alloc   # text and peer payloads through wc_alloc
 WASMCART_WGPU_DIR=$PWD/build/wgpu ./wgpu_alloc_test test/wgpu/wgpucart.wasc

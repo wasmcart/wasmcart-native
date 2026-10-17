@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <uv.h>
 #include "wc_log.h"
 
 // ─── Archive open/close ────────────────────────────────────────────────────
@@ -53,6 +54,7 @@ int wc_archive_open(wc_host_t* host, const char* path) {
         return -1;
     }
     host->archive = zip;
+    host->archive_path = strdup(path);
 
     // Read manifest.json
     int idx = mz_zip_reader_locate_file(zip, "manifest.json", NULL, 0);
@@ -103,6 +105,8 @@ int wc_archive_open_memory(wc_host_t* host, const uint8_t* data, size_t len) {
         return -1;
     }
     host->archive = zip;
+    host->archive_mem = data;
+    host->archive_mem_len = len;
 
     // Same flow as above for manifest + wasm extraction
     int idx = mz_zip_reader_locate_file(zip, "manifest.json", NULL, 0);
@@ -120,6 +124,11 @@ int wc_archive_open_memory(wc_host_t* host, const uint8_t* data, size_t len) {
 }
 
 void wc_archive_close(wc_host_t* host) {
+    wc_prefetch_close(host);
+    free(host->archive_path);
+    host->archive_path = NULL;
+    host->archive_mem = NULL;
+    host->archive_mem_len = 0;
     if (host->file_list) {
         free(host->file_list);
         host->file_list = NULL;
@@ -214,9 +223,335 @@ static const char* build_file_list(wc_host_t* host, uint32_t* out_len) {
     return host->file_list;
 }
 
+// ─── Asset prefetch ────────────────────────────────────────────────────────
+//
+// wasmcart SPEC.md, "Asset prefetch". The cart names an asset it will read
+// soon; the host extracts it on libuv's threadpool into a buffer of its own
+// and the cart's next wc_load_asset of that path is a memcpy. The table is
+// keyed by path, the call is also the poll, and the whole state machine runs
+// on the main thread: a job never touches the host, only its own reader (one
+// mz_zip_archive is not safe to share between threads) and its own buffer.
+//
+// A state the cart can see changes only in wc_prefetch_settle, which the frame
+// calls before wc_render: a job landing in the middle of a cart call (a uv_run
+// inside a WebGPU wait) marks the entry DONE, which still polls as PENDING.
+
+enum { PF_QUEUED, PF_INFLIGHT, PF_DONE, PF_READY, PF_FAILED };
+
+// The floors the SPEC sets are 64 pending or ready at once and one asset of
+// the maximum size (256 MiB); these are above both.
+#define PF_MAX_ENTRIES   256
+#define PF_MAX_INFLIGHT  4              // libuv's default threadpool
+#define PF_CACHE_BYTES   (512u << 20)   // READY copies plus the fetches in flight
+
+typedef struct wc_pf_entry wc_pf_entry;
+
+typedef struct {
+    uv_work_t       req;
+    wc_pf_entry*    entry;     // NULL once the entry was dropped under it
+    // the job's own view of the archive: no host state
+    char*           zip_path;
+    const uint8_t*  zip_mem;
+    size_t          zip_mem_len;
+    int             idx;
+    uint32_t        size;
+    uint8_t*        buf;
+    int             ok;
+} wc_pf_job;
+
+struct wc_pf_entry {
+    char*     path;
+    int       state;
+    int32_t   priority;
+    bool      cancelled;   // in flight: dropped when the job lands
+    bool      failed;      // DONE: the job did not deliver the bytes
+    int       idx;
+    uint32_t  size;
+    uint8_t*  data;        // READY: the bytes
+    wc_pf_job* job;
+};
+
+typedef struct {
+    wc_host_t*    host;      // NULL once closed: a job still landing touches only the table
+    wc_pf_entry** entries;
+    uint32_t      count;
+    uint32_t      cap;
+    uint32_t      inflight;
+    size_t        held;      // bytes reserved: READY copies and fetches in flight
+    uv_loop_t*    loop;
+} wc_prefetch_t;
+
+static wc_prefetch_t* pf_table(wc_host_t* host, uv_loop_t* loop) {
+    if (!host->prefetch) {
+        wc_prefetch_t* pf = calloc(1, sizeof(wc_prefetch_t));
+        if (!pf) return NULL;
+        pf->host = host;
+        pf->loop = loop;
+        host->prefetch = pf;
+    }
+    return (wc_prefetch_t*)host->prefetch;
+}
+
+static wc_pf_entry* pf_find(wc_prefetch_t* pf, const char* path) {
+    for (uint32_t i = 0; i < pf->count; i++)
+        if (strcmp(pf->entries[i]->path, path) == 0) return pf->entries[i];
+    return NULL;
+}
+
+static void pf_remove(wc_prefetch_t* pf, wc_pf_entry* e) {
+    for (uint32_t i = 0; i < pf->count; i++) {
+        if (pf->entries[i] != e) continue;
+        pf->entries[i] = pf->entries[--pf->count];
+        break;
+    }
+    if (e->job) e->job->entry = NULL;   // the job lands on its own and releases the bytes
+    else if (!e->failed) pf->held -= e->size;
+    free(e->data);
+    free(e->path);
+    free(e);
+}
+
+static void pf_work(uv_work_t* req) {
+    wc_pf_job* job = (wc_pf_job*)req;
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    mz_bool opened = job->zip_path ? mz_zip_reader_init_file(&zip, job->zip_path, 0)
+                                   : mz_zip_reader_init_mem(&zip, job->zip_mem, job->zip_mem_len, 0);
+    if (!opened) { job->ok = 0; return; }
+    mz_zip_archive_file_stat st;
+    job->ok = mz_zip_reader_file_stat(&zip, job->idx, &st) && st.m_uncomp_size == job->size &&
+              (job->size == 0 || mz_zip_reader_extract_to_mem(&zip, job->idx, job->buf, job->size, 0));
+    mz_zip_reader_end(&zip);
+}
+
+static void pf_start_queued(wc_prefetch_t* pf);
+static void pf_free_table(wc_prefetch_t* pf);
+
+static void pf_after(uv_work_t* req, int status) {
+    wc_pf_job* job = (wc_pf_job*)req;
+    wc_prefetch_t* pf = (wc_prefetch_t*)req->data;
+    wc_pf_entry* e = job->entry;
+    pf->inflight--;
+    if (!e || e->cancelled) {
+        // nobody wants the bytes any more
+        if (e) pf_remove(pf, e);     // pf_remove unlinks the job first, so the size is ours to release
+        pf->held -= job->size;
+        free(job->buf);
+    } else if (status != 0) {
+        // uv_cancel took it before the work ran (a cancel), and the cart has
+        // asked again since: start over, the bytes are still owed
+        e->job = NULL;
+        e->state = PF_QUEUED;
+        free(job->buf);
+    } else {
+        e->job = NULL;
+        e->state = PF_DONE;
+        if (job->ok) {
+            e->data = job->buf;
+        } else {
+            e->failed = true;
+            pf->held -= job->size;
+            free(job->buf);
+            wc_log("wasmcart: prefetch of asset %s failed\n", e->path);
+        }
+    }
+    free(job->zip_path);
+    free(job);
+    if (!pf->host) {
+        // closed while this was in flight: the last job frees the table
+        if (pf->inflight == 0) pf_free_table(pf);
+        return;
+    }
+    pf_start_queued(pf);
+}
+
+// Start the highest-priority queued fetches up to the concurrency limit.
+static void pf_start_queued(wc_prefetch_t* pf) {
+    wc_host_t* host = pf->host;
+    while (pf->inflight < PF_MAX_INFLIGHT) {
+        wc_pf_entry* best = NULL;
+        for (uint32_t i = 0; i < pf->count; i++) {
+            wc_pf_entry* e = pf->entries[i];
+            if (e->state == PF_QUEUED && (!best || e->priority > best->priority)) best = e;
+        }
+        if (!best) return;
+        wc_pf_job* job = calloc(1, sizeof(wc_pf_job));
+        uint8_t* buf = job ? malloc(best->size ? best->size : 1) : NULL;
+        if (!buf) {
+            free(job);
+            best->state = PF_DONE;
+            best->failed = true;
+            pf->held -= best->size;
+            continue;
+        }
+        job->req.data = pf;
+        job->entry = best;
+        job->zip_path = host->archive_path ? strdup(host->archive_path) : NULL;
+        job->zip_mem = host->archive_mem;
+        job->zip_mem_len = host->archive_mem_len;
+        job->idx = best->idx;
+        job->size = best->size;
+        job->buf = buf;
+        if (uv_queue_work(pf->loop, &job->req, pf_work, pf_after) != 0) {
+            free(buf);
+            free(job->zip_path);
+            free(job);
+            best->state = PF_DONE;
+            best->failed = true;
+            pf->held -= best->size;
+            continue;
+        }
+        best->job = job;
+        best->state = PF_INFLIGHT;
+        pf->inflight++;
+    }
+}
+
+static int32_t pf_state(const wc_pf_entry* e) {
+    switch (e->state) {
+    case PF_READY:  return WC_PREFETCH_READY;
+    case PF_FAILED: return WC_PREFETCH_FAILED;
+    default:        return WC_PREFETCH_PENDING;   // queued, in flight, or landed but not settled
+    }
+}
+
+int32_t wc_prefetch_request(wc_host_t* host, void* uv_loop, const char* path, int32_t priority) {
+    if (!host->archive) return WC_PREFETCH_MISSING;   // a bare .wasm has no assets
+    mz_zip_archive* zip = (mz_zip_archive*)host->archive;
+    wc_prefetch_t* pf = pf_table(host, (uv_loop_t*)uv_loop);
+    if (!pf) return WC_PREFETCH_REFUSED;
+
+    wc_pf_entry* e = pf_find(pf, path);
+    if (e) {
+        // the poll; a repeat asks again for a cancelled fetch still in flight,
+        // and may raise the priority (never lower it)
+        if (priority > e->priority) e->priority = priority;
+        if (e->cancelled) e->cancelled = false;
+        return pf_state(e);
+    }
+
+    int idx = -1;
+    uint32_t size = 0;
+    const char* at_once = NULL;   // bytes a host may copy inside the call
+    if (strcmp(path, "_filelist.txt") == 0) {
+        uint32_t flen = 0;
+        at_once = build_file_list(host, &flen);
+        if (!at_once) return WC_PREFETCH_MISSING;
+        size = flen;
+    } else {
+        idx = locate_asset(zip, &host->manifest, path);
+        if (idx < 0) return WC_PREFETCH_MISSING;
+        mz_zip_archive_file_stat st;
+        if (!mz_zip_reader_file_stat(zip, idx, &st)) return WC_PREFETCH_MISSING;
+        if (st.m_uncomp_size > 0x7fffffffu) return WC_PREFETCH_MISSING;   // as wc_asset_size could not return it
+        size = (uint32_t)st.m_uncomp_size;
+    }
+
+    if (pf->count >= PF_MAX_ENTRIES) return WC_PREFETCH_REFUSED;
+    bool fits_ever = size <= PF_CACHE_BYTES;
+    if (fits_ever && pf->held + size > PF_CACHE_BYTES && pf->held > 0) return WC_PREFETCH_REFUSED;
+    if (pf->count == pf->cap) {
+        uint32_t cap = pf->cap ? pf->cap * 2 : 16;
+        wc_pf_entry** grown = realloc(pf->entries, cap * sizeof(*grown));
+        if (!grown) return WC_PREFETCH_REFUSED;
+        pf->entries = grown;
+        pf->cap = cap;
+    }
+    e = calloc(1, sizeof(wc_pf_entry));
+    if (!e) return WC_PREFETCH_REFUSED;
+    e->path = strdup(path);
+    if (!e->path) { free(e); return WC_PREFETCH_REFUSED; }
+    e->priority = priority;
+    e->idx = idx;
+    e->size = size;
+    pf->entries[pf->count++] = e;
+
+    if (!fits_ever) {
+        // the host could not hold the bytes: FAILED until the cart cancels
+        e->state = PF_FAILED;
+        e->failed = true;
+        return WC_PREFETCH_FAILED;
+    }
+    pf->held += size;
+    if (at_once) {
+        e->data = malloc(size ? size : 1);
+        if (!e->data) { pf_remove(pf, e); return WC_PREFETCH_REFUSED; }
+        memcpy(e->data, at_once, size);
+        e->state = PF_READY;
+        return WC_PREFETCH_READY;
+    }
+    e->state = PF_QUEUED;
+    pf_start_queued(pf);
+    return WC_PREFETCH_PENDING;
+}
+
+void wc_prefetch_cancel(wc_host_t* host, const char* path) {
+    wc_prefetch_t* pf = (wc_prefetch_t*)host->prefetch;
+    if (!pf) return;
+    wc_pf_entry* e = pf_find(pf, path);
+    if (!e) return;
+    if (e->state == PF_INFLIGHT) {
+        // the transfer finishes on its own; the bytes are dropped when it lands
+        e->cancelled = true;
+        uv_cancel((uv_req_t*)&e->job->req);   // succeeds only if the work has not started
+        return;
+    }
+    pf_remove(pf, e);
+}
+
+void wc_prefetch_settle(wc_host_t* host) {
+    wc_prefetch_t* pf = (wc_prefetch_t*)host->prefetch;
+    if (!pf) return;
+    for (uint32_t i = 0; i < pf->count; i++) {
+        wc_pf_entry* e = pf->entries[i];
+        if (e->state != PF_DONE) continue;
+        e->state = e->failed ? PF_FAILED : PF_READY;
+        static int _done = 0;
+        if (_done < 5 && !e->failed) { wc_log("wasmcart: prefetched asset %s (%u bytes)\n", e->path, e->size); _done++; }
+    }
+}
+
+static void pf_free_table(wc_prefetch_t* pf) {
+    free(pf->entries);
+    free(pf);
+}
+
+uint32_t wc_prefetch_inflight(wc_host_t* host) {
+    wc_prefetch_t* pf = (wc_prefetch_t*)host->prefetch;
+    return pf ? pf->inflight : 0;
+}
+
+void wc_prefetch_close(wc_host_t* host) {
+    wc_prefetch_t* pf = (wc_prefetch_t*)host->prefetch;
+    if (!pf) return;
+    while (pf->count) {
+        wc_pf_entry* e = pf->entries[pf->count - 1];
+        if (e->job) uv_cancel((uv_req_t*)&e->job->req);   // not started yet: lands at once as cancelled
+        pf_remove(pf, e);
+    }
+    host->prefetch = NULL;
+    pf->host = NULL;
+    // A job in flight holds a reader of its own and a buffer of its own and
+    // touches nothing else; the last one to land frees the table (pf_after).
+    // wc_host_destroy pumps the loop until none is in flight before it gets
+    // here, so normally that is now.
+    if (pf->inflight == 0) pf_free_table(pf);
+}
+
+// A READY copy the reads answer from, or NULL.
+static wc_pf_entry* pf_ready(wc_host_t* host, const char* path) {
+    wc_prefetch_t* pf = (wc_prefetch_t*)host->prefetch;
+    if (!pf) return NULL;
+    wc_pf_entry* e = pf_find(pf, path);
+    return e && e->state == PF_READY ? e : NULL;
+}
+
 int32_t wc_archive_asset_size(wc_host_t* host, const char* path) {
     if (!host->archive) return -1;
     mz_zip_archive* zip = (mz_zip_archive*)host->archive;
+
+    wc_pf_entry* ready = pf_ready(host, path);
+    if (ready) return (int32_t)ready->size;
 
     if (strcmp(path, "_filelist.txt") == 0) {
         uint32_t flen = 0;
@@ -234,6 +569,23 @@ int32_t wc_archive_asset_size(wc_host_t* host, const char* path) {
 int32_t wc_archive_load_asset(wc_host_t* host, const char* path, uint8_t* dest, uint32_t max_size) {
     if (!host->archive) return -1;
     mz_zip_archive* zip = (mz_zip_archive*)host->archive;
+
+    wc_pf_entry* ready = pf_ready(host, path);
+    if (ready) {
+        // The copy the prefetch promised: no archive, no inflate. A whole read
+        // ends the prefetch (the cart has its own copy now); a truncated one
+        // keeps it, as the SPEC's "returns the asset's full size" says.
+        uint32_t n = ready->size;
+        if (n > max_size) {
+            wc_log("wasmcart: asset %s: size %u > max %u, truncating\n", path, n, max_size);
+            n = max_size;
+        }
+        memcpy(dest, ready->data, n);
+        static int _served = 0;
+        if (_served < 5) { wc_log("wasmcart: asset %s served from prefetch (%u bytes)\n", path, n); _served++; }
+        if (n == ready->size) pf_remove((wc_prefetch_t*)host->prefetch, ready);
+        return (int32_t)n;
+    }
 
     if (strcmp(path, "_filelist.txt") == 0) {
         uint32_t flen = 0;

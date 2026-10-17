@@ -244,6 +244,19 @@ extern "C" void wc_host_destroy(wc_host_t* host) {
         wgpu_wait(host, wgpu_call(host, "destroy", 0, nullptr), &why, 3000);
         host->uses_wgpu = false;
     }
+    if (host->v8_state && wc_prefetch_inflight(host)) {
+        // An asset fetch still on the threadpool lands through the loop: pump
+        // until it has (one extract each; bounded by the asset's size).
+        v8::Locker locker(g_isolate);
+        v8::Isolate::Scope isolate_scope(g_isolate);
+        v8::HandleScope hs(g_isolate);
+        v8::Context::Scope cs(ctx());
+        uint64_t deadline = uv_hrtime() + 5000000000ULL;  // 5 s
+        while (wc_prefetch_inflight(host) && uv_hrtime() < deadline) {
+            pump_node(host);
+            if (wc_prefetch_inflight(host)) uv_sleep(1);
+        }
+    }
     wc_archive_close(host);
     if (host->v8_state) {
         v8::Locker locker(g_isolate);
@@ -372,7 +385,12 @@ static void write_host_info(wc_host_t* host, const wc_host_options_t* opts) {
     wc_write_u32(mem, ptr + WC_HOST_INFO_HOST_FPS, opts ? opts->host_fps : 60);
     wc_write_u32(mem, ptr + WC_HOST_INFO_AUDIO_SAMPLE_RATE, opts ? opts->audio_sample_rate : 48000);
     // WC_HOST_FLAG_GPU_WGPU (0x02): this host selected WebGPU for the cart.
-    wc_write_u32(mem, ptr + WC_HOST_INFO_FLAGS, host->uses_wgpu ? 0x02u : 0u);
+    // WC_HOST_FLAG_ASSET_PREFETCH (0x04): wc_asset_prefetch is implemented
+    // (SPEC "Asset prefetch": a cart checks the flag, not the import's value,
+    // because an older host stubs the import). Off only for the test control.
+    uint32_t host_flags = (host->uses_wgpu ? WC_HOST_FLAG_GPU_WGPU : 0u)
+                        | (host->prefetch_off ? 0u : WC_HOST_FLAG_ASSET_PREFETCH);
+    wc_write_u32(mem, ptr + WC_HOST_INFO_FLAGS, host_flags);
     // The machine's hardware threads, for a cart that sizes a thread pool (0: unknown).
     // Only a cart declaring the 24-byte struct gets it.
     if (host->info.flags & WC_FLAG_HOST_THREADS)
@@ -444,6 +462,38 @@ static void v8_wc_load_asset(const v8::FunctionCallbackInfo<v8::Value>& args) {
     int32_t bytes = wc_archive_load_asset(_current_host, path,
         _current_host->memory + dest_ptr, max_size);
     args.GetReturnValue().Set(v8::Integer::New(g_isolate, bytes));
+}
+
+// Asset prefetch (SPEC "Asset prefetch"): the cart names an asset it will read
+// soon, the host extracts it on libuv's threadpool (pumped each frame), and
+// the same call polls the state. Nothing is written into cart memory: the path
+// is read here as wc_asset_size reads it, and the return is the state.
+static bool read_asset_path(const v8::FunctionCallbackInfo<v8::Value>& args, char* path) {
+    refresh_memory(_current_host);
+    uint32_t path_ptr = args[0]->Uint32Value(ctx()).FromJust();
+    uint32_t path_len = args[1]->Uint32Value(ctx()).FromJust();
+    if (path_len > 511 || path_ptr > _current_host->memory_size ||
+        path_len > _current_host->memory_size - path_ptr) return false;
+    memcpy(path, _current_host->memory + path_ptr, path_len);
+    path[path_len] = '\0';
+    return true;
+}
+
+static void v8_wc_asset_prefetch(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    char path[512];
+    if (!read_asset_path(args, path)) {
+        args.GetReturnValue().Set(v8::Integer::New(g_isolate, WC_PREFETCH_MISSING));
+        return;
+    }
+    int32_t priority = args[2]->Int32Value(ctx()).FromMaybe(0);
+    int32_t state = wc_prefetch_request(_current_host, g_setup->event_loop(), path, priority);
+    args.GetReturnValue().Set(v8::Integer::New(g_isolate, state));
+}
+
+static void v8_wc_asset_prefetch_cancel(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    char path[512];
+    if (!read_asset_path(args, path)) return;
+    wc_prefetch_cancel(_current_host, path);
 }
 
 static void v8_noop(const v8::FunctionCallbackInfo<v8::Value>& args) {
@@ -807,6 +857,13 @@ static v8::Local<v8::Object> build_env_imports() {
     env->Set(ctx(), v8str("wc_log"), make_fn(v8_wc_log)).Check();
     env->Set(ctx(), v8str("wc_asset_size"), make_fn(v8_wc_asset_size)).Check();
     env->Set(ctx(), v8str("wc_load_asset"), make_fn(v8_wc_load_asset)).Check();
+    // Asset prefetch: provided with WC_HOST_FLAG_ASSET_PREFETCH. With
+    // WASMCART_NO_PREFETCH set the cart gets what an older host gives it: the
+    // auto-stub (returns 0, logged) and no flag, which is the tests' control.
+    if (!_current_host->prefetch_off) {
+        env->Set(ctx(), v8str("wc_asset_prefetch"), make_fn(v8_wc_asset_prefetch)).Check();
+        env->Set(ctx(), v8str("wc_asset_prefetch_cancel"), make_fn(v8_wc_asset_prefetch_cancel)).Check();
+    }
     env->Set(ctx(), v8str("emscripten_notify_memory_growth"), make_fn(v8_emscripten_notify_memory_growth)).Check();
     env->Set(ctx(), v8str("emscripten_memcpy_js"), make_fn(v8_emscripten_memcpy_js)).Check();
     env->Set(ctx(), v8str("emscripten_stack_init"), make_fn(v8_noop)).Check();
@@ -1786,6 +1843,10 @@ extern "C" int wc_host_load_file(wc_host_t* host, const char* wasc_path, const w
 
     // 3. Build import object
     auto imports = v8::Object::New(g_isolate);
+    {
+        const char* pf_env = getenv("WASMCART_NO_PREFETCH");
+        host->prefetch_off = pf_env && strcmp(pf_env, "0") != 0;
+    }
     auto env_imports = build_env_imports();
     auto wasi_imports = build_wasi_imports();
     {
@@ -2867,6 +2928,7 @@ extern "C" void wc_host_run_frame(wc_host_t* host) {
 
     refresh_memory(host);     // the store the imports read (wc_refresh_memory), checked once a frame
     pump_node(host);          // let node's async work progress before the frame
+    wc_prefetch_settle(host);   // the asset fetches that landed become READY, here and nowhere else
     drain_js_peer_events(host); // move socket events into the peer records
     deliver_peers(host);        // then into the cart, at a known point
     deliver_text(host);         // before render, like every other input

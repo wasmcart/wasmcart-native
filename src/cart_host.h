@@ -95,6 +95,19 @@ struct wc_host {
 
     // .wasc archive (kept open for wc_load_asset)
     void* archive;  // mz_zip_archive*
+    // Where the archive came from, so a background fetch can open a reader of
+    // its own on it (one mz_zip_archive is not safe to use from two threads).
+    char*          archive_path;
+    const uint8_t* archive_mem;
+    size_t         archive_mem_len;
+
+    // Asset prefetch (wasmcart SPEC.md, "Asset prefetch"): the host's own
+    // copies of assets the cart asked for ahead of a read, extracted on
+    // libuv's threadpool. wc_archive_asset_size and wc_archive_load_asset
+    // answer from a READY copy first. NULL until the first request.
+    void* prefetch;      // wc_prefetch_t* (asset_loader.c)
+    bool  prefetch_off;  // WASMCART_NO_PREFETCH: the imports are not provided
+                         // and the flag is not written (an old host, for tests)
 
     // Rumble backend supplied by the embedder (libretro, SDL, ...).
     // has_rumble == NULL means "no backend": the imports become silent no-ops
@@ -150,6 +163,24 @@ void wc_archive_close(wc_host_t* host);
 
 int32_t wc_archive_load_asset(wc_host_t* host, const char* path, uint8_t* dest, uint32_t max_size);
 int32_t wc_archive_asset_size(wc_host_t* host, const char* path);
+
+// ─── Asset prefetch (wasmcart SPEC.md, "Asset prefetch") ───────────────
+//
+// The two imports' state machine, main thread only. `uv_loop` is the host's
+// libuv loop (uv_loop_t*): a fetch is one uv_queue_work job that extracts the
+// entry with a reader of its own, into a buffer the host keeps until the cart
+// reads the whole asset or cancels. Returns WC_PREFETCH_* (abi.h).
+int32_t wc_prefetch_request(wc_host_t* host, void* uv_loop, const char* path, int32_t priority);
+void    wc_prefetch_cancel(wc_host_t* host, const char* path);
+// Promote the fetches that finished to READY/FAILED. Called once per frame,
+// before wc_render, so a state change is never seen during a call into the
+// cart (SPEC: "observed between calls into the cart").
+void    wc_prefetch_settle(wc_host_t* host);
+// Fetches in flight on the threadpool; wc_host_destroy pumps until zero.
+uint32_t wc_prefetch_inflight(wc_host_t* host);
+// Drop every copy; a job still in flight frees the table when it lands.
+// wc_archive_close calls it.
+void    wc_prefetch_close(wc_host_t* host);
 
 int wc_parse_manifest(wc_host_t* host, const char* json, size_t len);
 

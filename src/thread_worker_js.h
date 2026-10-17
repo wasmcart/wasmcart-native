@@ -226,6 +226,10 @@ for (const imp of WebAssembly.Module.imports(wasmModule)) {
     if (n === 'wc_log') val = (p, l) => log(readStr(p, l));
     else if (n === 'wc_asset_size') val = assetSize;
     else if (n === 'wc_load_asset') val = loadAsset;
+    // prefetch is main-thread state (SPEC "Asset prefetch"): a cart thread is
+    // refused (-3) and reads the archive as before; it degrades, never traps
+    else if (n === 'wc_asset_prefetch') val = () => -3;
+    else if (n === 'wc_asset_prefetch_cancel') val = () => {};
     else if (n === 'wc_debug_mark' || n === 'wc_frame_yield') val = () => {};
     else if (jit.imports[n]) val = jit.imports[n];
     else if (__wcActionImports[n]) val = __wcActionImports[n]; // main-thread state: "unknown" here

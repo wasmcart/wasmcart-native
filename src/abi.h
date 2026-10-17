@@ -52,6 +52,18 @@
 #define WC_HOST_INFO_HARDWARE_THREADS  20
 #define WC_HOST_INFO_SIZE              20  // 24 with WC_FLAG_HOST_THREADS
 
+// wc_host_info_t.flags bits this host writes
+#define WC_HOST_FLAG_GPU_WGPU        0x02  // the host selected WebGPU for the cart
+#define WC_HOST_FLAG_ASSET_PREFETCH  0x04  // the host implements wc_asset_prefetch
+
+// ─── Asset prefetch states (wc_asset_prefetch's return) ────────────────────
+
+#define WC_PREFETCH_PENDING   0   // the host is fetching
+#define WC_PREFETCH_READY     1   // the bytes are in host memory: wc_load_asset is a copy
+#define WC_PREFETCH_MISSING  -1   // no such asset, or an invalid path (as wc_asset_size)
+#define WC_PREFETCH_FAILED   -2   // the fetch failed, or the host could not hold the bytes
+#define WC_PREFETCH_REFUSED  -3   // nothing started: too many pending, cache full, or a cart thread
+
 // ─── wc_time_t layout (20 bytes) ───────────────────────────────────────────
 // f64 time_ms   (offset 0)
 // f64 delta_ms  (offset 8)
