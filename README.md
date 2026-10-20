@@ -125,7 +125,7 @@ JavaScript, inside this player's embedded Node, with Dawn from
 [native-dawn](https://github.com/monteslu/native-dawn). Point CMake at both:
 
 ```bash
-cmake .. -DWASMCART_WGPU_JS_DIR=<wasmcart 0.34.4 or later>/src/wgpu \
+cmake .. -DWASMCART_WGPU_JS_DIR=<wasmcart 0.35.1 or later>/src/wgpu \
          -DNATIVE_DAWN_DIR=<native-dawn 0.1.6 or later>/dist/linux-x64
 ```
 
