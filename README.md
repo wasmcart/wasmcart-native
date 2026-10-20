@@ -231,7 +231,13 @@ wasmcart-run (75MB, statically linked)
 
 ## Input
 
-- **Gamepad**: SDL2 GameController API with 2,182 built-in controller mappings
+- **Gamepad**: SDL2 GameController API with 2,182 built-in controller mappings,
+  every `WC_BTN_*` bit (Guide, Misc, the four paddles and the touchpad click
+  too) and SDL's triggers as they are (0..32767). To see what a controller
+  delivers, run wasmcart's test cart:
+  `wasmcart-run node_modules/wasmcart/testcart/testcart.wasc` (in the wasmcart
+  npm package, or `testcart/` in the wasmcart repo): every pad, pointer slot and
+  key, a note per face button with L/R channel panning, and a save check
 - **Keyboard**: Arrow keys / WASD / Z / X mapped to gamepad for pad-only carts
 - **4 players**: Up to 4 controllers supported simultaneously, each in its own
   pad slot (pad N is player N + 1)
