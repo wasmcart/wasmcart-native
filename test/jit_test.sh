@@ -25,9 +25,9 @@ check() { # $1 = label, $2 = file, $3 = expected substring
 }
 run 1
 check "link, call through the slot, unlink, re-link into the same slot" "$OUT/dump1.json" \
-  '"off": -1, "max_module": 4194304, "link_ret": 2, "cell": 2, "call_result": 12, "relink_ret": 2, "cell2": 2, "done": 1'
+  '"off": -1, "max_module": 268435456, "link_ret": 2, "cell": 2, "call_result": 12, "relink_ret": 2, "cell2": 2, "done": 1'
 run 0
-check "off switch: the cart sees key 1 = 1 and -1 from the link" "$OUT/dump0.json" '"off": 1, "max_module": 4194304, "link_ret": -1, "cell": -1'
+check "off switch: the cart sees key 1 = 1 and -1 from the link" "$OUT/dump0.json" '"off": 1, "max_module": 268435456, "link_ret": -1, "cell": -1'
 check "off switch: the loud notice" "$OUT/run0.log" 'RUNTIME CODE GENERATION IS OFF'
 node "$DIR/jit_generation.mjs" || fail=1
 exit $fail
