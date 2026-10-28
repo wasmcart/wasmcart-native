@@ -71,8 +71,20 @@ module.exports = function createBridge(dir) {
         // WASMCART_WGPU_POWER=low-power|high-performance picks the GPU on a
         // two-GPU machine (wasmcart docs/webgpu.md); the choice is logged so a
         // caller can assert it. A pin names the GPU exactly instead.
-        const adapterOptions = host.wgpuAdapterOptions();
-        const adapter = await gpu.requestAdapter(adapterOptions).catch(e => { if (pin) return null; throw e; });
+        // The feature level: core WebGPU where the adapter offers it (an HDR
+        // scene can multisample, depth textures can be read directly), else
+        // compatibility mode, wasmcart's floor (a dual cart would otherwise
+        // fall back to GL); WASMCART_WGPU_FEATURE_LEVEL=core|compatibility
+        // forces one.
+        const level = process.env.WASMCART_WGPU_FEATURE_LEVEL || '';
+        if (level && level !== 'core' && level !== 'compatibility')
+          throw new Error(`WASMCART_WGPU_FEATURE_LEVEL=${level}: expected core or compatibility`);
+        let adapterOptions = { ...host.wgpuAdapterOptions(), featureLevel: level || 'core' };
+        let adapter = await gpu.requestAdapter(adapterOptions).catch(e => { if (pin) return null; throw e; });
+        if (!adapter && !level) {
+          adapterOptions = { ...adapterOptions, featureLevel: 'compatibility' };
+          adapter = await gpu.requestAdapter(adapterOptions).catch(e => { if (pin) return null; throw e; });
+        }
         if (!adapter) throw new Error(pin ? `no WebGPU adapter on the GPU ${pin} (the GL context's)` : 'no WebGPU adapter is available (check the GPU driver)');
         const a = host.describeAdapter(adapter, adapterOptions);
         process.stderr.write(`wasmcart-run: WebGPU on ${a.device || a.description} (${a.vendor}, ${a.featureLevel}${pin ? ', GPU ' + pin : a.powerPreference ? ', ' + a.powerPreference : ''}), Dawn validation ${on ? 'on' : 'off'}\n`);
@@ -99,6 +111,7 @@ module.exports = function createBridge(dir) {
         }
         rec.session = await host.createWgpuSession({
           moduleImports: WebAssembly.Module.imports(module), gpu, adapter, width, height,
+          adapterOptions: { featureLevel: adapterOptions.featureLevel },
           globals: dawn.globals,
           log: msg => process.stderr.write(msg + '\n'),
           onLost: info => { rec.lost = info; },

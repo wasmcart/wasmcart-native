@@ -43,6 +43,11 @@ Environment:
   WASMCART_WGPU_POWER=low-power|high-performance
                          Which GPU WebGPU carts get on a two-GPU machine
                          (low-power = integrated); the choice is logged
+  WASMCART_WGPU_FEATURE_LEVEL=core|compatibility
+                         The WebGPU feature level of a cart's device. Default:
+                         core where the adapter offers it (an HDR scene can
+                         multisample), else compatibility mode, wasmcart's
+                         floor; the level is logged
   WASMCART_WGPU_VALIDATION=1|0
                          Keep or skip Dawn's command validation. Default:
                          skipped (it costs CPU on every call), kept in a
