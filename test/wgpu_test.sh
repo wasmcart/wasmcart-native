@@ -19,7 +19,10 @@
 #   wgpufake     imports a WebGPU function the glue lacks; refused
 #   wasicart     wgpucart built with wasi-sdk (wasip1-threads, two workers)
 #   wgpuedges    reconfigures its surface from 128x96 to 160x120 at frame 10
-#                and draws blue from then on
+#                and draws blue from then on. It asks for 8192-texel textures to
+#                get a device above the host's and destroys that device, so it
+#                runs at compatibility mode: a core host device already has
+#                them, so it would be handed the host's device and destroy it
 #   wgpulost     destroys the host's device at frame 5, as a driver reset
 #                loses it
 #
@@ -99,7 +102,10 @@ check "malloc-only WebGPU cart: no deprecation warning"     "$(grep -ci 'depreca
 check "malloc-only WebGPU cart: exits without crashing"     "$(cat "$OUT/old031.status")" "0"
 
 run wgpucart 3 lowpower WASMCART_WGPU_POWER=low-power
-has   "WASMCART_WGPU_POWER reaches the adapter request"     lowpower "compatibility, low-power)"
+has   "WASMCART_WGPU_POWER reaches the adapter request"     lowpower ", low-power)"
+has   "a core device where the adapter has one"             lowpower "core, low-power)"
+run wgpucart 3 compatlevel WASMCART_WGPU_POWER=low-power WASMCART_WGPU_FEATURE_LEVEL=compatibility
+has   "WASMCART_WGPU_FEATURE_LEVEL forces compatibility mode" compatlevel "compatibility, low-power)"
 
 run wgpucart 8 novalidation WASMCART_WGPU_VALIDATION=0
 has   "WASMCART_WGPU_VALIDATION=0 skips Dawn's validation"  novalidation "Dawn validation off"
@@ -109,7 +115,7 @@ check "without validation: compute result"              "$(pixel novalidation 2 
 # A shot after the cart resized its surface: the host adopts the size the cart
 # wrote into wc_info_t, so the frame is read (it used to never be written and
 # the run had to be killed).
-run wgpuedges 12 resized
+run wgpuedges 12 resized WASMCART_WGPU_FEATURE_LEVEL=compatibility
 check "resized webgpu cart: shot is the new size"     "$(head -c 15 "$OUT/resized.ppm" 2>/dev/null | tr '\n' ' ')" "P6 160 120 255 "
 check "resized webgpu cart: shot is the new frame"    "$(pixel resized 150 110 2>/dev/null)" "0,0,255"
 check "resized webgpu cart: clean exit"               "$(cat "$OUT/resized.status")" "0"
@@ -163,7 +169,7 @@ check "8 more runs exit cleanly" "$crashes" "0"
 crashes=0
 k=0
 while [ $k -lt 20 ]; do
-  run wgpuedges 3 ownloop
+  run wgpuedges 3 ownloop WASMCART_WGPU_FEATURE_LEVEL=compatibility
   [ "$(cat "$OUT/ownloop.status")" = "0" ] || crashes=$((crashes + 1))
   k=$((k + 1))
 done

@@ -20,7 +20,6 @@ extern "C" {
 #define WC_MIN_ABI_VERSION 4
 
 #define WC_MAX_PADS        4
-#define WC_PAD_SIZE        16
 #define WC_TIME_SIZE       20
 #define WC_MAX_POINTERS    10
 #define WC_KEYS_STATE_SIZE 32
@@ -120,7 +119,7 @@ typedef struct {
     // v3 extended
     uint32_t pointer_ptr;
     uint32_t keys_ptr;
-    uint32_t gpu_api;          // 0=2D, 1=WebGL2/GLES3, 2=WebGPU, 3=Vulkan
+    uint32_t gpu_api;          // 0=2D, 1=WebGL2/GLES3, 2=WebGPU; any other value is refused at load
     // v3.1
     uint32_t wheel_ptr;        // wc_wheel_t, 0 = cart does not read the wheel
 } wc_cart_info_t;
@@ -129,7 +128,6 @@ typedef struct {
 #define WC_GPU_API_NONE    0
 #define WC_GPU_API_WEBGL2  1
 #define WC_GPU_API_WEBGPU  2
-#define WC_GPU_API_VULKAN  3
 
 // Manifest `controls` presentation hint (SPEC.md, Manifest > Fields): which
 // parts of the standard pad the game actually reads. Advisory only — every
